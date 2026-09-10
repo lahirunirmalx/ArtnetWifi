@@ -1,2 +1,6 @@
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
-CONFIG_LWIP_SO_RCVBUF=y
+
+# An Art-Net controller sends one packet per universe back to back, so a
+# multi-universe frame arrives as a burst. The default UDP receive mailbox
+# holds 6 packets and silently drops the rest. 32 covers a 32 universe rig.
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=32

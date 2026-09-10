@@ -70,6 +70,10 @@ struct artnet_ctx {
     uint8_t            physical;
     uint8_t            sequence;
 
+    /* Cached SO_RCVTIMEO, so a steady poll interval costs no setsockopt. */
+    uint32_t rcvtimeo_ms;
+    bool     rcvtimeo_set;
+
     /* Optional receive task. */
     TaskHandle_t      task;
     volatile bool     task_run;
@@ -129,15 +133,21 @@ static esp_err_t artnet_resolve(const char *host, struct sockaddr_in *out)
  *   [14..15] universe, little endian
  *   [16..17] data length, big endian, always even
  */
-static uint16_t artnet_make_packet(artnet_handle_t h)
+static void artnet_init_tx_header(artnet_handle_t h)
 {
-    uint16_t len;
-
+    /* Bytes 0..11 never change, so they are written once instead of on every
+     * packet. artnet_make_packet() only touches the four mutable fields. */
     memcpy(h->tx_buf, artnet_id, sizeof(artnet_id));
     h->tx_buf[8] = (uint8_t)(ARTNET_OP_DMX & 0xff);
     h->tx_buf[9] = (uint8_t)(ARTNET_OP_DMX >> 8);
     h->tx_buf[10] = (uint8_t)(ARTNET_PROTOCOL_VER >> 8);
     h->tx_buf[11] = (uint8_t)(ARTNET_PROTOCOL_VER & 0xff);
+}
+
+static uint16_t artnet_make_packet(artnet_handle_t h)
+{
+    uint16_t len;
+
     h->tx_buf[12] = h->sequence;
     h->sequence++;
     if (h->sequence == 0) {
@@ -253,6 +263,7 @@ esp_err_t artnet_init(const artnet_config_t *config, artnet_handle_t *out_handle
     h->sock = -1;
     h->sequence = 1;
     h->tx_length = ARTNET_MAX_DMX;
+    artnet_init_tx_header(h);
     h->dmx_cb = config->dmx_cb;
     h->user_ctx = config->user_ctx;
 
@@ -314,14 +325,39 @@ void artnet_deinit(artnet_handle_t h)
 /* receive                                                            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Apply a receive timeout, skipping the syscall when it is already in effect.
+ * A steady poll interval, which is what the receive task does, therefore costs
+ * one setsockopt for the lifetime of the handle rather than one per packet.
+ */
+static void artnet_apply_timeout(artnet_handle_t h, uint32_t timeout_ms)
+{
+    struct timeval tv;
+
+    if (h->rcvtimeo_set && h->rcvtimeo_ms == timeout_ms) {
+        return;
+    }
+
+    if (timeout_ms == UINT32_MAX) {
+        /* lwIP reads an all-zero timeval as "block forever". */
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+    } else {
+        tv.tv_sec = (time_t)(timeout_ms / 1000U);
+        tv.tv_usec = (suseconds_t)((timeout_ms % 1000U) * 1000U);
+    }
+
+    setsockopt(h->sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    h->rcvtimeo_ms = timeout_ms;
+    h->rcvtimeo_set = true;
+}
+
 esp_err_t artnet_read(artnet_handle_t h, uint32_t timeout_ms, uint16_t *out_opcode)
 {
     struct sockaddr_in from;
     socklen_t from_len = sizeof(from);
-    struct timeval tv;
-    fd_set read_set;
     uint16_t opcode;
-    int rc;
+    int flags = 0;
     int n;
 
     if (h == NULL || h->sock < 0) {
@@ -332,28 +368,22 @@ esp_err_t artnet_read(artnet_handle_t h, uint32_t timeout_ms, uint16_t *out_opco
         return ESP_ERR_INVALID_STATE;
     }
 
-    FD_ZERO(&read_set);
-    FD_SET(h->sock, &read_set);
-    tv.tv_sec = (time_t)(timeout_ms / 1000U);
-    tv.tv_usec = (suseconds_t)((timeout_ms % 1000U) * 1000U);
-
-    rc = select(h->sock + 1, &read_set, NULL, NULL,
-                timeout_ms == UINT32_MAX ? NULL : &tv);
-    if (rc == 0) {
-        return ESP_ERR_TIMEOUT;
-    }
-    if (rc < 0) {
-        if (errno == EINTR) {
-            return ESP_ERR_TIMEOUT;
-        }
-        ESP_LOGE(TAG, "select failed: errno %d", errno);
-        return ESP_FAIL;
+    /*
+     * One blocking recvfrom rather than select() followed by recvfrom. That
+     * halves the number of lwIP entries per received packet, and select() is
+     * the more expensive of the two: it takes the core lock and registers a
+     * select callback on every call.
+     */
+    if (timeout_ms == 0) {
+        flags = MSG_DONTWAIT;
+    } else {
+        artnet_apply_timeout(h, timeout_ms);
     }
 
-    n = recvfrom(h->sock, h->rx_buf, sizeof(h->rx_buf), 0,
+    n = recvfrom(h->sock, h->rx_buf, sizeof(h->rx_buf), flags,
                  (struct sockaddr *)&from, &from_len);
     if (n < 0) {
-        if (errno == EWOULDBLOCK || errno == EAGAIN) {
+        if (errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR) {
             return ESP_ERR_TIMEOUT;
         }
         ESP_LOGE(TAG, "recvfrom failed: errno %d", errno);

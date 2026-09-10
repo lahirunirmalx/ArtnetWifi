@@ -101,6 +101,44 @@ The transmit buffer is separate from the receive buffer, so one handle can send
 and receive at the same time. The host name is resolved once, at
 `artnet_init()` or `artnet_set_host()`, not on every packet.
 
+## Multi-universe setups
+
+An Art-Net controller sends one UDP packet per universe, back to back, so a
+frame for an N universe rig arrives as a burst of N packets within about a
+millisecond. lwIP queues them in a per-socket mailbox whose depth is
+`CONFIG_LWIP_UDP_RECVMBOX_SIZE`, **6 by default**. Anything past that is
+dropped before this component ever sees it, which shows up as missing or
+flickering universes.
+
+Raise it in your project's `sdkconfig.defaults`:
+
+```
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=32
+```
+
+The valid range is 6 to 64. Pick at least your universe count. Note that
+`CONFIG_LWIP_SO_RCVBUF` is not the knob for this: it adds a byte ceiling that
+causes *more* drops, it does not add queue capacity.
+
+Also give the receive path room to drain the burst: run it with
+`artnet_start_task()` at a priority above your rendering work, and keep the
+callback short. Copying the frame into your own buffer and signalling another
+task is the usual pattern.
+
+## Performance notes
+
+- One `recvfrom()` per received packet. The receive timeout is applied with
+  `SO_RCVTIMEO` and cached on the handle, so a steady poll interval costs no
+  further syscalls, and `artnet_read(h, 0, ...)` uses `MSG_DONTWAIT` with no
+  setsockopt at all.
+- The constant part of the ArtDmx header, bytes 0 to 11, is written once at
+  `artnet_init()`. `artnet_write()` only updates sequence, physical, universe
+  and length.
+- The transmit target is resolved once, at `artnet_init()` or
+  `artnet_set_host()`, never per packet.
+- No dynamic allocation after `artnet_init()`. Both buffers live in the handle,
+  which is a single ~1.1 kB allocation.
+
 ## API summary
 
 | Area      | Function |

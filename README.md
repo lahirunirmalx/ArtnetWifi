@@ -68,6 +68,8 @@ idf_component_register(SRCS "main.c" REQUIRES artnet)
   transmit walkthroughs, multi-universe tuning.
 - **[Examples](examples/esp-idf)** - `artnet_receive` and `artnet_transmit`,
   buildable with `idf.py` straight from this repository.
+- **[Host tests](test/host)** - the protocol code compiles and runs on Linux
+  over real loopback UDP, no hardware needed: `cd test/host && make`.
 
 ```
 . $IDF_PATH/export.sh
