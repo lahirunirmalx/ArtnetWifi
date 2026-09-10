@@ -2,7 +2,6 @@
  * Art-Net receive example.
  *
  * Joins a Wi-Fi network, listens on UDP 6454 and logs incoming ArtDmx frames.
- * Counterpart of the upstream ArtnetWifiDebug sketch.
  *
  * Logging is rate limited on purpose. A log line costs milliseconds of
  * blocking UART time, and the callback runs on the receive path, so logging

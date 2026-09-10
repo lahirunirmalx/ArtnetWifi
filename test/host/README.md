@@ -31,11 +31,12 @@ parser and the packet builder are all exercised for real rather than mocked.
 | write_ip / write_to | raw-address send, resolver send, refusal without a host |
 | task guards | invalid `core_id` rejected before FreeRTOS can assert, failed start leaves the handle usable, `deinit(NULL)` |
 
-The suite is mutation-checked: re-introducing each of the upstream bugs listed
-in [the component README](../../components/artnet/README.md#behaviour-differences-from-the-upstream-arduino-library),
-including the shared transmit/receive buffer, and each of the fixes above
-(stale `rx_length`, unzeroed padding, unchecked `core_id`, `set_buffer` changing
-the length, skipped zero-length callback) makes at least one check fail.
+The suite is mutation-checked: reverting any of the parser and builder
+safeguards it covers (short-packet rejection, length clamping, the channel
+index bound, separate transmit and receive buffers, `rx_length` reset on
+non-DMX packets, zeroed padding, `core_id` validation, copy-only `set_buffer`,
+the zero-length callback, the ArtPollReply fields) makes at least one check
+fail.
 
 Note that FreeRTOS task creation is stubbed out here, so `artnet_start_task()`
 is not covered. The synchronous `artnet_read()` path that the task wraps is.

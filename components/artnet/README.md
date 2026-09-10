@@ -1,13 +1,8 @@
 # artnet - Art-Net for ESP-IDF
 
-A pure ESP-IDF component that sends and receives Art-Net (DMX over UDP) frames.
-No Arduino core, no `WiFi.h`, no `String`, no `IPAddress`. It talks straight to
-lwIP BSD sockets and returns `esp_err_t`.
-
-This is a rewrite of the upstream Arduino library
-[rstephan/ArtnetWifi](https://github.com/rstephan/ArtnetWifi). The Art-Net wire
-format and the behaviour are the same, the API is not: it is a C handle-based
-API that fits ESP-IDF conventions.
+An ESP-IDF component that receives and transmits Art-Net (DMX over UDP) frames
+and answers discovery polls. Plain C over lwIP BSD sockets, `esp_err_t` returns,
+one handle per node, no dependencies beyond ESP-IDF.
 
 ## Adding it to a project
 
@@ -225,53 +220,6 @@ shows it end to end with a length-1 queue.
 | Rx state  | `artnet_get_opcode`, `artnet_get_universe`, `artnet_get_rx_length`, `artnet_get_sequence`, `artnet_get_dmx`, `artnet_get_sender_ip`, `artnet_log_packet` |
 | Discovery | `cfg.node` (identity), `artnet_send_poll_reply`, `artnet_set_node_ip` |
 | Transmit  | `artnet_set_host`, `artnet_set_universe`, `artnet_set_physical`, `artnet_set_length`, `artnet_set_byte`, `artnet_set_buffer`, `artnet_get_tx_dmx`, `artnet_write`, `artnet_write_ip`, `artnet_write_to` |
-
-## Coming from the upstream Arduino `ArtnetWifi` class
-
-| Arduino (upstream) | ESP-IDF (here) |
-|--------------------|----------------|
-| `ArtnetWifi artnet; artnet.begin(host)` | `artnet_init(&cfg, &handle)` with `cfg.host = host` |
-| `artnet.stop()` | `artnet_deinit(handle)` |
-| `artnet.read()` | `artnet_read(handle, timeout_ms, &opcode)` |
-| `artnet.setArtDmxCallback(fn)` | `cfg.dmx_cb = fn` (plus `cfg.user_ctx`) |
-| `artnet.setArtDmxFunc(lambda)` | `cfg.user_ctx` carries the context instead |
-| `artnet.getDmxFrame()` | `artnet_get_dmx(handle)` (receive, only meaningful when `artnet_get_opcode() == ARTNET_OP_DMX`) / `artnet_get_tx_dmx(handle)` (transmit) |
-| `artnet.getLength()` | `artnet_get_rx_length(handle)` for a received frame. `artnet_get_length(handle)` is the *transmit* length and is not what `getLength()` returned after `read()`. |
-| `artnet.getSequence()` | `artnet_get_sequence(handle)`, receive side only. The outgoing sequence counter is not readable. |
-| `artnet.getUniverse()` / `setUniverse(u)` | `artnet_get_universe(handle)` (receive) / `artnet_set_universe(handle, u)` (transmit) |
-| `artnet.setByte(pos, val)` | `artnet_set_byte(handle, pos, val)` |
-| `artnet.setLength(n)` | `artnet_set_length(handle, n)`, rounded up to even |
-| `artnet.write()` / `write(ip)` | `artnet_write(handle)` / `artnet_write_ip(handle, ip)` / `artnet_write_to(handle, host)` |
-| `artnet.getSenderIp()` | `artnet_get_sender_ip(handle)` (IPv4, network byte order) |
-| `printPacketHeader/Content()` | `artnet_log_packet(handle, with_data)` |
-
-## Behaviour differences from the upstream Arduino library
-
-These are deliberate fixes, not oversights:
-
-1. Short packets are rejected before the header is read. The Arduino version
-   parses bytes 12 to 17 of any packet that carries a valid `Art-Net` ID,
-   regardless of how short the datagram actually was.
-2. The DMX length from the wire is clamped to what really arrived and to 512.
-   The Arduino version passes the advertised length to the callback unchecked,
-   so a malformed packet makes the callback read past the received data.
-3. `artnet_set_byte()` rejects `pos == 512`. The Arduino `setByte()` uses
-   `pos > 512`, so channel 512 writes one byte past the DMX area.
-4. Transmit and receive use separate buffers. In the Arduino version a received
-   packet overwrites the data staged for transmission.
-5. The transmit target is resolved once instead of on every `write()`.
-6. After a non-DMX packet (ArtPoll, ArtPollReply, ArtSync) the receive length
-   reads as 0. The Arduino getters kept returning the previous DMX frame's
-   universe and length while `getDmxFrame()` pointed at the new packet's bytes.
-7. An odd transmit length is rounded up at `setLength()` time and the padding
-   channel is zeroed. The Arduino version rounded up in `write()` and sent
-   whatever stale byte followed the declared data.
-
-Kept identical on purpose: the callback fires for every valid ArtDmx frame,
-including zero-length ones that some controllers use as keep-alives.
-
-Added over upstream: `ArtPoll` is answered with an `ArtPollReply`, so the node
-is discoverable. The upstream library only reported the op-code.
 
 ## Not implemented
 

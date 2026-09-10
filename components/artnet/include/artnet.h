@@ -28,11 +28,11 @@ THE SOFTWARE.
 */
 
 /*
- * Art-Net for ESP-IDF.
+ * Art-Net node for ESP-IDF.
  *
- * Pure ESP-IDF / lwIP implementation. No Arduino core, no WiFi.h, no String.
- * Wi-Fi (or Ethernet) is brought up by the application; this component only
- * owns a UDP socket.
+ * Receives and transmits ArtDmx frames and answers ArtPoll, over lwIP BSD
+ * sockets. Wi-Fi (or Ethernet) is brought up by the application; this
+ * component only owns a UDP socket.
  */
 
 #ifndef ARTNET_H

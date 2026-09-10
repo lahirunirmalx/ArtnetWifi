@@ -2,8 +2,7 @@
  * Art-Net multi-universe example.
  *
  * Assembles a 240 LED strip (720 channels, 2 universes) from Art-Net and hands
- * each complete frame to a render task. Counterpart of the upstream FastLED and
- * NeoPixel sketches, minus the LED driver: the render task is a stub that logs
+ * each complete frame to a render task. The render task is a stub that logs
  * frame statistics, with a comment where led_strip / RMT output goes.
  *
  * The shape is the point. The DMX callback runs on the receive task and must

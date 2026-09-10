@@ -2,7 +2,6 @@
  * Art-Net transmit example.
  *
  * Sends a single universe with 3 channels, ramping an RGB lamp up to white.
- * Counterpart of the upstream ArtnetWifiTransmit sketch.
  *
  * This example may be copied under the terms of the MIT license, see the
  * LICENSE file for details.

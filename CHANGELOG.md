@@ -11,6 +11,7 @@ change for Arduino users.
   `keywords.txt` and the five `.ino` sketches. Arduino and PlatformIO
   `lib_deps` users should pin to tag `1.6.3`, the last Arduino release, or use
   upstream [rstephan/ArtnetWifi](https://github.com/rstephan/ArtnetWifi).
+  Porting a sketch: see [docs/migrating-from-arduino.md](docs/migrating-from-arduino.md).
 
 ### Added
 
