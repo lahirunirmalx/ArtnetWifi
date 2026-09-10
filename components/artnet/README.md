@@ -40,8 +40,10 @@ Then declare the dependency in the component that uses it:
 idf_component_register(SRCS "main.c" REQUIRES artnet)
 ```
 
-Requires ESP-IDF 4.4 or newer. Verified building against IDF 4.3.2 and 5.3.1 on
-ESP32 (Xtensa) and ESP32-C3 (RISC-V).
+The manifest requires ESP-IDF 4.4 or newer, so the Component Manager route
+needs 4.4+. The code itself also builds on 4.3.2 through `EXTRA_COMPONENT_DIRS`,
+which skips the manifest check. Build-verified on IDF 4.3.2, 5.3.1 and 5.5.4,
+on ESP32 (Xtensa) and ESP32-C3 (RISC-V).
 
 ## Receiving
 
@@ -51,6 +53,9 @@ ESP32 (Xtensa) and ESP32-C3 (RISC-V).
 static void on_dmx(const artnet_dmx_t *frame, void *user_ctx)
 {
     /* frame->data is valid for the duration of this call only. */
+    if (frame->length == 0) {
+        return; /* keep-alive frame, nothing to show */
+    }
     ESP_LOGI("app", "universe %u, %u channels, first byte %u",
              frame->universe, frame->length, frame->data[0]);
 }
@@ -76,9 +81,19 @@ To keep `app_main` free, run the receive loop in its own task instead:
 ```c
 artnet_task_config_t tcfg = ARTNET_TASK_CONFIG_DEFAULT();
 
-tcfg.core_id = 1;                       /* pin the RX task to APP_CPU */
+tcfg.priority = 6;                      /* above the rendering work */
+tcfg.core_id = 1;                       /* dual-core targets only: pin to APP_CPU */
 ESP_ERROR_CHECK(artnet_start_task(artnet, &tcfg));
 ```
+
+A `core_id` the target does not have returns `ESP_ERR_INVALID_ARG` rather than
+tripping the FreeRTOS assert. Do not call `artnet_stop_task()` or
+`artnet_deinit()` from inside the callback: they run on the receive task and
+would wait for themselves, so they return `ESP_ERR_INVALID_STATE` there.
+
+Once the task is running it owns the receive path. Consume frames inside the
+callback; the `artnet_get_*()` accessors and `artnet_read()` are for the
+synchronous style only.
 
 ## Transmitting
 
@@ -87,6 +102,7 @@ artnet_config_t cfg = ARTNET_CONFIG_DEFAULT();
 artnet_handle_t artnet;
 
 cfg.host = "2.255.255.255";             /* broadcast is enabled by default */
+cfg.tx_only = true;                     /* not receiving: do not bind port 6454 */
 ESP_ERROR_CHECK(artnet_init(&cfg, &artnet));
 
 artnet_set_universe(artnet, 0);
@@ -100,6 +116,21 @@ artnet_write(artnet);
 The transmit buffer is separate from the receive buffer, so one handle can send
 and receive at the same time. The host name is resolved once, at
 `artnet_init()` or `artnet_set_host()`, not on every packet.
+
+`artnet_set_length()` is the only call that changes the frame length, and it
+keeps it even as Art-Net requires: `artnet_set_length(h, 5)` sends 6 channels
+with the sixth zeroed, and `artnet_get_length()` reports 6. `artnet_set_byte()`
+and `artnet_set_buffer()` only write channels.
+
+To answer a controller directly, `artnet_write_ip(h, frame->sender_ip)` sends
+to a raw address with no lookup, which is cheap enough for every frame.
+`artnet_write_to(h, "name")` resolves on every call and is meant for the
+occasional packet.
+
+`tx_only` matters on a busy LAN. Every controller broadcasts ArtDmx and ArtPoll
+on port 6454; a node bound to that port which never reads keeps up to
+`CONFIG_LWIP_UDP_RECVMBOX_SIZE` of those datagrams, and the Wi-Fi RX buffers
+behind them, parked forever. A `tx_only` handle takes an ephemeral port instead.
 
 ## Multi-universe setups
 
@@ -120,10 +151,15 @@ The valid range is 6 to 64. Pick at least your universe count. Note that
 `CONFIG_LWIP_SO_RCVBUF` is not the knob for this: it adds a byte ceiling that
 causes *more* drops, it does not add queue capacity.
 
+`artnet_init()` logs a one-line reminder at boot while the mailbox is still at
+its default of 6, because the failure it prevents is otherwise silent.
+
 Also give the receive path room to drain the burst: run it with
 `artnet_start_task()` at a priority above your rendering work, and keep the
 callback short. Copying the frame into your own buffer and signalling another
-task is the usual pattern.
+task is the usual pattern; the
+[`artnet_multi_universe`](../../examples/esp-idf/artnet_multi_universe) example
+shows it end to end with a length-1 queue.
 
 ## Performance notes
 
@@ -135,9 +171,13 @@ task is the usual pattern.
   `artnet_init()`. `artnet_write()` only updates sequence, physical, universe
   and length.
 - The transmit target is resolved once, at `artnet_init()` or
-  `artnet_set_host()`, never per packet.
+  `artnet_set_host()`, never per packet. `artnet_write_ip()` skips resolution
+  entirely.
+- Transmit failures are logged once per outage, not once per packet. During a
+  Wi-Fi drop every `sendto()` fails, and a log line per frame would hold the
+  transmit path on the UART for longer than the frame itself.
 - No dynamic allocation after `artnet_init()`. Both buffers live in the handle,
-  which is a single ~1.1 kB allocation.
+  which is a single ~1.1 kB allocation plus one semaphore.
 
 ## API summary
 
@@ -146,7 +186,7 @@ task is the usual pattern.
 | Lifecycle | `artnet_init`, `artnet_deinit` |
 | Receive   | `artnet_read`, `artnet_start_task`, `artnet_stop_task` |
 | Rx state  | `artnet_get_opcode`, `artnet_get_universe`, `artnet_get_rx_length`, `artnet_get_sequence`, `artnet_get_dmx`, `artnet_get_sender_ip`, `artnet_log_packet` |
-| Transmit  | `artnet_set_host`, `artnet_set_universe`, `artnet_set_physical`, `artnet_set_length`, `artnet_set_byte`, `artnet_set_buffer`, `artnet_get_tx_dmx`, `artnet_write`, `artnet_write_to` |
+| Transmit  | `artnet_set_host`, `artnet_set_universe`, `artnet_set_physical`, `artnet_set_length`, `artnet_set_byte`, `artnet_set_buffer`, `artnet_get_tx_dmx`, `artnet_write`, `artnet_write_ip`, `artnet_write_to` |
 
 ## Coming from the upstream Arduino `ArtnetWifi` class
 
@@ -157,9 +197,13 @@ task is the usual pattern.
 | `artnet.read()` | `artnet_read(handle, timeout_ms, &opcode)` |
 | `artnet.setArtDmxCallback(fn)` | `cfg.dmx_cb = fn` (plus `cfg.user_ctx`) |
 | `artnet.setArtDmxFunc(lambda)` | `cfg.user_ctx` carries the context instead |
-| `artnet.getDmxFrame()` | `artnet_get_dmx(handle)` (receive) / `artnet_get_tx_dmx(handle)` (transmit) |
+| `artnet.getDmxFrame()` | `artnet_get_dmx(handle)` (receive, only meaningful when `artnet_get_opcode() == ARTNET_OP_DMX`) / `artnet_get_tx_dmx(handle)` (transmit) |
+| `artnet.getLength()` | `artnet_get_rx_length(handle)` for a received frame. `artnet_get_length(handle)` is the *transmit* length and is not what `getLength()` returned after `read()`. |
+| `artnet.getSequence()` | `artnet_get_sequence(handle)`, receive side only. The outgoing sequence counter is not readable. |
+| `artnet.getUniverse()` / `setUniverse(u)` | `artnet_get_universe(handle)` (receive) / `artnet_set_universe(handle, u)` (transmit) |
 | `artnet.setByte(pos, val)` | `artnet_set_byte(handle, pos, val)` |
-| `artnet.write()` / `write(ip)` | `artnet_write(handle)` / `artnet_write_to(handle, host)` |
+| `artnet.setLength(n)` | `artnet_set_length(handle, n)`, rounded up to even |
+| `artnet.write()` / `write(ip)` | `artnet_write(handle)` / `artnet_write_ip(handle, ip)` / `artnet_write_to(handle, host)` |
 | `artnet.getSenderIp()` | `artnet_get_sender_ip(handle)` (IPv4, network byte order) |
 | `printPacketHeader/Content()` | `artnet_log_packet(handle, with_data)` |
 
@@ -178,6 +222,15 @@ These are deliberate fixes, not oversights:
 4. Transmit and receive use separate buffers. In the Arduino version a received
    packet overwrites the data staged for transmission.
 5. The transmit target is resolved once instead of on every `write()`.
+6. After a non-DMX packet (ArtPoll, ArtPollReply, ArtSync) the receive length
+   reads as 0. The Arduino getters kept returning the previous DMX frame's
+   universe and length while `getDmxFrame()` pointed at the new packet's bytes.
+7. An odd transmit length is rounded up at `setLength()` time and the padding
+   channel is zeroed. The Arduino version rounded up in `write()` and sent
+   whatever stale byte followed the declared data.
+
+Kept identical on purpose: the callback fires for every valid ArtDmx frame,
+including zero-length ones that some controllers use as keep-alives.
 
 ## Not implemented
 

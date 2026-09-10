@@ -29,6 +29,7 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_connect(WIFI_SSID, WIFI_PASS));
 
     cfg.host = ARTNET_HOST;
+    cfg.tx_only = true; /* nothing here reads, so do not queue the LAN's Art-Net traffic */
     ESP_ERROR_CHECK(artnet_init(&cfg, &artnet));
 
     artnet_set_universe(artnet, START_UNIVERSE);

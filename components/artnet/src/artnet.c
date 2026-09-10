@@ -30,6 +30,7 @@ THE SOFTWARE.
 #include "artnet.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -37,6 +38,7 @@ THE SOFTWARE.
 #include "freertos/semphr.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "artnet";
 
@@ -45,6 +47,18 @@ static const char artnet_id[8] = ARTNET_ID;
 
 /* Smallest packet that still carries ID, op-code and protocol version. */
 #define ARTNET_MIN_PACKET 12
+
+/* Poll interval of the receive task, and therefore the worst case stop latency. */
+#define ARTNET_TASK_POLL_MS 100
+
+/* Number of cores the target has, for validating a requested core_id. */
+#if defined(configNUMBER_OF_CORES)
+#define ARTNET_NUM_CORES configNUMBER_OF_CORES
+#elif defined(portNUM_PROCESSORS)
+#define ARTNET_NUM_CORES portNUM_PROCESSORS
+#else
+#define ARTNET_NUM_CORES 1
+#endif
 
 struct artnet_ctx {
     int sock;
@@ -65,14 +79,16 @@ struct artnet_ctx {
     uint8_t            tx_buf[ARTNET_MAX_PACKET];
     struct sockaddr_in dest;
     bool               dest_valid;
+    bool               tx_failing; /* last sendto failed, error already reported */
     uint16_t           tx_length;
     uint16_t           tx_universe;
     uint8_t            physical;
     uint8_t            sequence;
 
-    /* Cached SO_RCVTIMEO, so a steady poll interval costs no setsockopt. */
+    /* Requested SO_RCVTIMEO currently in effect, 0 when none applied yet.
+     * A zero timeout never reaches the socket (it uses MSG_DONTWAIT), so 0 is
+     * free to mean "not set". */
     uint32_t rcvtimeo_ms;
-    bool     rcvtimeo_set;
 
     /* Optional receive task. */
     TaskHandle_t      task;
@@ -84,6 +100,11 @@ struct artnet_ctx {
 /* helpers                                                            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Resolve a host string into a sockaddr. lwIP's getaddrinfo() tries a literal
+ * address before it touches DNS, so a dotted quad or broadcast address costs a
+ * tcpip thread hop and nothing more.
+ */
 static esp_err_t artnet_resolve(const char *host, struct sockaddr_in *out)
 {
     struct addrinfo hints;
@@ -92,15 +113,6 @@ static esp_err_t artnet_resolve(const char *host, struct sockaddr_in *out)
 
     if (host == NULL || host[0] == '\0' || out == NULL) {
         return ESP_ERR_INVALID_ARG;
-    }
-
-    memset(out, 0, sizeof(*out));
-    out->sin_family = AF_INET;
-    out->sin_port = htons(ARTNET_PORT);
-
-    /* Fast path for the common dotted quad, avoids a DNS round trip. */
-    if (inet_pton(AF_INET, host, &out->sin_addr) == 1) {
-        return ESP_OK;
     }
 
     memset(&hints, 0, sizeof(hints));
@@ -116,10 +128,21 @@ static esp_err_t artnet_resolve(const char *host, struct sockaddr_in *out)
         return ESP_ERR_NOT_FOUND;
     }
 
+    memset(out, 0, sizeof(*out));
+    out->sin_family = AF_INET;
+    out->sin_port = htons(ARTNET_PORT);
     out->sin_addr = ((struct sockaddr_in *)res->ai_addr)->sin_addr;
     freeaddrinfo(res);
 
     return ESP_OK;
+}
+
+static void artnet_addr_from_ip(uint32_t ipv4, struct sockaddr_in *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->sin_family = AF_INET;
+    out->sin_port = htons(ARTNET_PORT);
+    out->sin_addr.s_addr = ipv4;
 }
 
 /*
@@ -146,8 +169,6 @@ static void artnet_init_tx_header(artnet_handle_t h)
 
 static uint16_t artnet_make_packet(artnet_handle_t h)
 {
-    uint16_t len;
-
     h->tx_buf[12] = h->sequence;
     h->sequence++;
     if (h->sequence == 0) {
@@ -158,14 +179,11 @@ static uint16_t artnet_make_packet(artnet_handle_t h)
     h->tx_buf[14] = (uint8_t)(h->tx_universe & 0xff);
     h->tx_buf[15] = (uint8_t)(h->tx_universe >> 8);
 
-    len = h->tx_length + (h->tx_length % 2); /* the spec wants an even length */
-    if (len > ARTNET_MAX_DMX) {
-        len = ARTNET_MAX_DMX;
-    }
-    h->tx_buf[16] = (uint8_t)(len >> 8);
-    h->tx_buf[17] = (uint8_t)(len & 0xff);
+    /* tx_length is kept even and <= 512 by artnet_set_length(). */
+    h->tx_buf[16] = (uint8_t)(h->tx_length >> 8);
+    h->tx_buf[17] = (uint8_t)(h->tx_length & 0xff);
 
-    return len;
+    return h->tx_length;
 }
 
 static esp_err_t artnet_send(artnet_handle_t h, const struct sockaddr_in *dest)
@@ -176,8 +194,21 @@ static esp_err_t artnet_send(artnet_handle_t h, const struct sockaddr_in *dest)
     sent = sendto(h->sock, h->tx_buf, ARTNET_DMX_START + len, 0,
                   (const struct sockaddr *)dest, sizeof(*dest));
     if (sent < 0) {
-        ESP_LOGE(TAG, "sendto failed: errno %d", errno);
+        /*
+         * Report a failure once per outage rather than once per packet. During
+         * a Wi-Fi drop every sendto fails, and a log line per frame would stall
+         * the transmit path on the UART for longer than the frame itself.
+         */
+        if (!h->tx_failing) {
+            h->tx_failing = true;
+            ESP_LOGW(TAG, "sendto failed: errno %d (further failures not logged)", errno);
+        }
         return ESP_FAIL;
+    }
+
+    if (h->tx_failing) {
+        h->tx_failing = false;
+        ESP_LOGI(TAG, "transmit recovered");
     }
 
     return ESP_OK;
@@ -207,7 +238,14 @@ static uint16_t artnet_parse(artnet_handle_t h, int n, uint32_t sender_ip)
     h->rx_packet_size = (uint16_t)n;
     h->sender_ip = sender_ip;
 
-    if (opcode == ARTNET_OP_DMX) {
+    if (opcode != ARTNET_OP_DMX) {
+        /* rx_buf now holds this packet, not DMX data. Make the DMX accessors
+         * say so instead of describing a frame that is no longer there. */
+        h->rx_length = 0;
+        return opcode;
+    }
+
+    {
         uint16_t length;
 
         h->rx_sequence = h->rx_buf[12];
@@ -223,7 +261,7 @@ static uint16_t artnet_parse(artnet_handle_t h, int n, uint32_t sender_ip)
         }
         h->rx_length = length;
 
-        if (h->dmx_cb != NULL && length > 0) {
+        if (h->dmx_cb != NULL) {
             artnet_dmx_t frame = {
                 .universe = h->rx_universe,
                 .length = length,
@@ -238,6 +276,12 @@ static uint16_t artnet_parse(artnet_handle_t h, int n, uint32_t sender_ip)
     return opcode;
 }
 
+/* True when the caller is the receive task, which must not wait on itself. */
+static bool artnet_in_rx_task(artnet_handle_t h)
+{
+    return h->task != NULL && xTaskGetCurrentTaskHandle() == h->task;
+}
+
 /* ------------------------------------------------------------------ */
 /* lifecycle                                                          */
 /* ------------------------------------------------------------------ */
@@ -247,6 +291,7 @@ esp_err_t artnet_init(const artnet_config_t *config, artnet_handle_t *out_handle
     artnet_config_t defaults = ARTNET_CONFIG_DEFAULT();
     struct sockaddr_in bind_addr;
     artnet_handle_t h;
+    uint16_t port;
     int opt = 1;
 
     if (out_handle == NULL) {
@@ -263,13 +308,20 @@ esp_err_t artnet_init(const artnet_config_t *config, artnet_handle_t *out_handle
     h->sock = -1;
     h->sequence = 1;
     h->tx_length = ARTNET_MAX_DMX;
-    artnet_init_tx_header(h);
     h->dmx_cb = config->dmx_cb;
     h->user_ctx = config->user_ctx;
+    artnet_init_tx_header(h);
+
+    h->task_done = xSemaphoreCreateBinary();
+    if (h->task_done == NULL) {
+        free(h);
+        return ESP_ERR_NO_MEM;
+    }
 
     h->sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (h->sock < 0) {
         ESP_LOGE(TAG, "socket failed: errno %d", errno);
+        vSemaphoreDelete(h->task_done);
         free(h);
         return ESP_FAIL;
     }
@@ -279,46 +331,75 @@ esp_err_t artnet_init(const artnet_config_t *config, artnet_handle_t *out_handle
         setsockopt(h->sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
     }
 
+    /* A transmit-only node takes an ephemeral port so the LAN's Art-Net
+     * broadcasts are not queued for a reader that will never come. */
+    if (config->tx_only) {
+        port = 0;
+    } else {
+        port = config->port != 0 ? config->port : ARTNET_PORT;
+    }
+
     memset(&bind_addr, 0, sizeof(bind_addr));
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    bind_addr.sin_port = htons(config->port != 0 ? config->port : ARTNET_PORT);
+    bind_addr.sin_port = htons(port);
 
     if (bind(h->sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
-        ESP_LOGE(TAG, "bind to port %u failed: errno %d", ntohs(bind_addr.sin_port), errno);
+        ESP_LOGE(TAG, "bind to port %u failed: errno %d", port, errno);
         close(h->sock);
+        vSemaphoreDelete(h->task_done);
         free(h);
         return ESP_FAIL;
     }
 
-    if (config->host != NULL) {
-        if (artnet_resolve(config->host, &h->dest) == ESP_OK) {
-            h->dest_valid = true;
-        } else {
-            /* Not fatal, the application can retry with artnet_set_host(). */
-            ESP_LOGW(TAG, "transmit target '%s' unresolved for now", config->host);
-        }
+    if (config->host != NULL && artnet_set_host(h, config->host) != ESP_OK) {
+        /* Not fatal, the application can retry with artnet_set_host(). */
+        ESP_LOGW(TAG, "transmit target '%s' unresolved for now", config->host);
     }
 
-    ESP_LOGI(TAG, "listening on UDP port %u", ntohs(bind_addr.sin_port));
+    if (config->tx_only) {
+        ESP_LOGI(TAG, "transmit only, not listening on port %u", ARTNET_PORT);
+    } else {
+        ESP_LOGI(TAG, "listening on UDP port %u", port);
+#ifdef CONFIG_LWIP_UDP_RECVMBOX_SIZE
+        if (CONFIG_LWIP_UDP_RECVMBOX_SIZE <= 6) {
+            /* The failure this prevents is silent, so say it once at boot. */
+            ESP_LOGI(TAG, "CONFIG_LWIP_UDP_RECVMBOX_SIZE is %d: frames with more "
+                          "universes than that will lose packets, raise it in sdkconfig",
+                     CONFIG_LWIP_UDP_RECVMBOX_SIZE);
+        }
+#endif
+    }
+
     *out_handle = h;
 
     return ESP_OK;
 }
 
-void artnet_deinit(artnet_handle_t h)
+esp_err_t artnet_deinit(artnet_handle_t h)
 {
+    esp_err_t err;
+
     if (h == NULL) {
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
 
-    artnet_stop_task(h);
+    err = artnet_stop_task(h);
+    if (err != ESP_OK) {
+        /* Called from the receive task. Freeing the handle under our own feet
+         * is not an option, so leave everything in place and say so. */
+        ESP_LOGE(TAG, "artnet_deinit called from the receive task, ignored");
+        return err;
+    }
 
     if (h->sock >= 0) {
         close(h->sock);
         h->sock = -1;
     }
+    vSemaphoreDelete(h->task_done);
     free(h);
+
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -333,23 +414,36 @@ void artnet_deinit(artnet_handle_t h)
 static void artnet_apply_timeout(artnet_handle_t h, uint32_t timeout_ms)
 {
     struct timeval tv;
+    uint32_t ms = timeout_ms;
 
-    if (h->rcvtimeo_set && h->rcvtimeo_ms == timeout_ms) {
+    if (h->rcvtimeo_ms == timeout_ms) {
         return;
     }
 
-    if (timeout_ms == UINT32_MAX) {
+    if (ms == UINT32_MAX) {
         /* lwIP reads an all-zero timeval as "block forever". */
-        tv.tv_sec = 0;
-        tv.tv_usec = 0;
+        ms = 0;
     } else {
-        tv.tv_sec = (time_t)(timeout_ms / 1000U);
-        tv.tv_usec = (suseconds_t)((timeout_ms % 1000U) * 1000U);
+        /* lwIP rejects anything above INT_MAX milliseconds. Clamp to a tick
+         * multiple so the round-up below cannot push it back over. */
+        const uint32_t max_ms = ((uint32_t)INT32_MAX / portTICK_PERIOD_MS) * portTICK_PERIOD_MS;
+
+        if (ms > max_ms) {
+            ms = max_ms;
+        }
+        /* lwIP truncates to whole ticks. Round up so a short wait is a wait,
+         * not a hot poll. */
+        ms = ((ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS) * portTICK_PERIOD_MS;
     }
 
-    setsockopt(h->sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    h->rcvtimeo_ms = timeout_ms;
-    h->rcvtimeo_set = true;
+    tv.tv_sec = (time_t)(ms / 1000U);
+    tv.tv_usec = (suseconds_t)((ms % 1000U) * 1000U);
+
+    if (setsockopt(h->sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0) {
+        h->rcvtimeo_ms = timeout_ms;
+    } else {
+        ESP_LOGW(TAG, "SO_RCVTIMEO %" PRIu32 " ms rejected: errno %d", timeout_ms, errno);
+    }
 }
 
 esp_err_t artnet_read(artnet_handle_t h, uint32_t timeout_ms, uint16_t *out_opcode)
@@ -363,7 +457,7 @@ esp_err_t artnet_read(artnet_handle_t h, uint32_t timeout_ms, uint16_t *out_opco
     if (h == NULL || h->sock < 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (h->task != NULL && xTaskGetCurrentTaskHandle() != h->task) {
+    if (h->task != NULL && !artnet_in_rx_task(h)) {
         /* The receive task owns rx_buf, a second reader would corrupt it. */
         return ESP_ERR_INVALID_STATE;
     }
@@ -404,7 +498,13 @@ static void artnet_task(void *arg)
 
     while (h->task_run) {
         /* Short timeout so a stop request is picked up quickly. */
-        artnet_read(h, 100, NULL);
+        esp_err_t err = artnet_read(h, ARTNET_TASK_POLL_MS, NULL);
+
+        if (err == ESP_FAIL || err == ESP_ERR_INVALID_STATE) {
+            /* A socket error persists; back off instead of spinning on it.
+             * Timeouts and foreign packets are normal and cost nothing. */
+            vTaskDelay(pdMS_TO_TICKS(ARTNET_TASK_POLL_MS));
+        }
     }
 
     xSemaphoreGive(h->task_done);
@@ -425,27 +525,26 @@ esp_err_t artnet_start_task(artnet_handle_t h, const artnet_task_config_t *cfg)
     if (cfg == NULL) {
         cfg = &defaults;
     }
-
-    if (h->task_done == NULL) {
-        h->task_done = xSemaphoreCreateBinary();
-        if (h->task_done == NULL) {
-            return ESP_ERR_NO_MEM;
-        }
+    if (cfg->core_id != tskNO_AFFINITY &&
+        (cfg->core_id < 0 || cfg->core_id >= (BaseType_t)ARTNET_NUM_CORES)) {
+        /* FreeRTOS asserts on this inside xTaskCreatePinnedToCore, which
+         * would reboot the device. Fail the call instead. */
+        ESP_LOGE(TAG, "core_id %d does not exist on this target (%d core(s))",
+                 (int)cfg->core_id, (int)ARTNET_NUM_CORES);
+        return ESP_ERR_INVALID_ARG;
     }
 
     h->task_run = true;
     ok = xTaskCreatePinnedToCore(artnet_task,
-                                 cfg->name != NULL ? cfg->name : "artnet_rx",
-                                 cfg->stack_size != 0 ? cfg->stack_size : 4096,
+                                 cfg->name != NULL ? cfg->name : defaults.name,
+                                 cfg->stack_size != 0 ? cfg->stack_size : defaults.stack_size,
                                  h,
-                                 cfg->priority != 0 ? cfg->priority : 5,
+                                 cfg->priority != 0 ? cfg->priority : defaults.priority,
                                  &h->task,
                                  cfg->core_id);
     if (ok != pdPASS) {
         h->task_run = false;
         h->task = NULL;
-        vSemaphoreDelete(h->task_done);
-        h->task_done = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -460,13 +559,15 @@ esp_err_t artnet_stop_task(artnet_handle_t h)
     if (h->task == NULL) {
         return ESP_OK;
     }
+    if (artnet_in_rx_task(h)) {
+        /* The only give comes from the task we are in, after this call
+         * returns. Waiting here would never end. */
+        return ESP_ERR_INVALID_STATE;
+    }
 
     h->task_run = false;
     xSemaphoreTake(h->task_done, portMAX_DELAY);
     h->task = NULL;
-
-    vSemaphoreDelete(h->task_done);
-    h->task_done = NULL;
 
     return ESP_OK;
 }
@@ -540,9 +641,20 @@ void artnet_set_physical(artnet_handle_t h, uint8_t physical)
 
 void artnet_set_length(artnet_handle_t h, uint16_t length)
 {
-    if (h != NULL) {
-        h->tx_length = length > ARTNET_MAX_DMX ? ARTNET_MAX_DMX : length;
+    if (h == NULL) {
+        return;
     }
+    if (length > ARTNET_MAX_DMX) {
+        length = ARTNET_MAX_DMX;
+    }
+    if (length % 2 != 0) {
+        /* The spec wants an even count. The caller declared the extra channel
+         * as not theirs, so it goes out as zero rather than as whatever an
+         * earlier frame left in the buffer. */
+        h->tx_buf[ARTNET_DMX_START + length] = 0;
+        length++;
+    }
+    h->tx_length = length;
 }
 
 uint16_t artnet_get_length(artnet_handle_t h)
@@ -570,7 +682,6 @@ esp_err_t artnet_set_buffer(artnet_handle_t h, uint16_t offset, const uint8_t *d
     }
 
     memcpy(h->tx_buf + ARTNET_DMX_START + offset, data, len);
-    h->tx_length = (uint16_t)(offset + len);
 
     return ESP_OK;
 }
@@ -586,11 +697,25 @@ esp_err_t artnet_write(artnet_handle_t h)
         return ESP_ERR_INVALID_ARG;
     }
     if (!h->dest_valid) {
-        ESP_LOGE(TAG, "no transmit target, call artnet_set_host() first");
+        /* The return code says it; a log line per frame would only cost. */
+        ESP_LOGD(TAG, "no transmit target, call artnet_set_host() first");
         return ESP_ERR_INVALID_STATE;
     }
 
     return artnet_send(h, &h->dest);
+}
+
+esp_err_t artnet_write_ip(artnet_handle_t h, uint32_t ipv4)
+{
+    struct sockaddr_in dest;
+
+    if (h == NULL || h->sock < 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    artnet_addr_from_ip(ipv4, &dest);
+
+    return artnet_send(h, &dest);
 }
 
 esp_err_t artnet_write_to(artnet_handle_t h, const char *host)

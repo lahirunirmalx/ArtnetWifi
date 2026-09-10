@@ -15,4 +15,5 @@ static inline BaseType_t xTaskCreatePinnedToCore(TaskFunction_t fn, const char *
 }
 static inline TaskHandle_t xTaskGetCurrentTaskHandle(void) { return (TaskHandle_t)0; }
 static inline void vTaskDelete(TaskHandle_t t) { (void)t; }
+static inline void vTaskDelay(TickType_t t) { (void)t; }
 #endif

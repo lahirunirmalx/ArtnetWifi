@@ -11,4 +11,5 @@ typedef uint32_t      TickType_t;
 #define tskNO_AFFINITY 0x7FFFFFFF
 #define portMAX_DELAY  0xFFFFFFFFU
 #define pdMS_TO_TICKS(ms) (ms)
+#define portTICK_PERIOD_MS 1
 #endif

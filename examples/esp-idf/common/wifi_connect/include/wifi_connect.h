@@ -11,7 +11,8 @@ extern "C" {
 
 /*
  * Initialise NVS, the network stack and Wi-Fi, then join the given network.
- * Blocks until an IPv4 address is assigned or the retry limit is reached.
+ * Blocks until an IPv4 address is assigned, retrying for as long as it takes.
+ * Returns ESP_ERR_INVALID_ARG for an SSID over 32 bytes or a password over 64.
  */
 esp_err_t wifi_connect(const char *ssid, const char *password);
 

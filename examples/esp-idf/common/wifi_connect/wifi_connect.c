@@ -1,4 +1,11 @@
-/* Minimal Wi-Fi station helper shared by the Art-Net examples. MIT licensed. */
+/*
+ * Minimal Wi-Fi station helper shared by the Art-Net examples. MIT licensed.
+ *
+ * ESP-IDF ships a richer version of this as examples/common_components/
+ * protocol_examples_common (example_connect(), menuconfig driven, Ethernet and
+ * IPv6 aware). This copy exists so the examples build with no Kconfig step and
+ * stay readable in one file; if you outgrow it, switch to example_connect().
+ */
 
 #include "wifi_connect.h"
 
@@ -13,8 +20,6 @@
 #include "nvs_flash.h"
 
 #define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAILED_BIT    BIT1
-#define WIFI_MAX_RETRY     10
 
 static const char *TAG = "wifi";
 
@@ -26,13 +31,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_count < WIFI_MAX_RETRY) {
-            s_retry_count++;
-            ESP_LOGW(TAG, "disconnected, retry %d/%d", s_retry_count, WIFI_MAX_RETRY);
-            esp_wifi_connect();
-        } else {
-            xEventGroupSetBits(s_wifi_events, WIFI_FAILED_BIT);
-        }
+        /* Retry forever. A lighting node with no network is useless, and a
+         * panic-reboot loop would only add a backtrace to every attempt. The
+         * driver spaces reconnects itself, so no delay is needed here. */
+        s_retry_count++;
+        ESP_LOGW(TAG, "disconnected, reconnecting (attempt %d)", s_retry_count);
+        esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
 
@@ -46,10 +50,22 @@ esp_err_t wifi_connect(const char *ssid, const char *password)
 {
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     wifi_config_t sta_cfg = { 0 };
-    EventBits_t bits;
+    size_t ssid_len;
+    size_t pass_len;
     esp_err_t err;
 
     if (ssid == NULL || password == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* The driver fields are fixed size and need no terminator when full, so a
+     * 32 character SSID and a 64 hex digit PSK are both legal. Anything longer
+     * is a configuration error, not something to truncate quietly. */
+    ssid_len = strnlen(ssid, sizeof(sta_cfg.sta.ssid) + 1);
+    pass_len = strnlen(password, sizeof(sta_cfg.sta.password) + 1);
+    if (ssid_len == 0 || ssid_len > sizeof(sta_cfg.sta.ssid) ||
+        pass_len > sizeof(sta_cfg.sta.password)) {
+        ESP_LOGE(TAG, "SSID must be 1..32 bytes and the password at most 64");
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -75,16 +91,15 @@ esp_err_t wifi_connect(const char *ssid, const char *password)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                         wifi_event_handler, NULL, NULL));
 
-    strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid) - 1);
-    strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
+    memcpy(sta_cfg.sta.ssid, ssid, ssid_len);
+    memcpy(sta_cfg.sta.password, password, pass_len);
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "connecting to '%s'", ssid);
-    bits = xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT,
-                               pdFALSE, pdFALSE, portMAX_DELAY);
+    xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
-    return (bits & WIFI_CONNECTED_BIT) ? ESP_OK : ESP_FAIL;
+    return ESP_OK;
 }

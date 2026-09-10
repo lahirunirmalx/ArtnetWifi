@@ -1,4 +1,4 @@
-# Artnet-IDF
+# ArtnetWifi for ESP-IDF
 
 An Art-Net (DMX over UDP) node for **ESP-IDF**. No Arduino core, no `WiFi.h`,
 no `String`, no `IPAddress`. It talks straight to lwIP BSD sockets, returns
@@ -12,6 +12,9 @@ ESP32-C3/C6/H2, over Wi-Fi or Ethernet. Requires ESP-IDF 4.4 or newer.
 
 static void on_dmx(const artnet_dmx_t *frame, void *user_ctx)
 {
+    if (frame->length == 0) {
+        return; /* keep-alive frame, nothing to show */
+    }
     ESP_LOGI("app", "universe %u, %u channels, first byte %u",
              frame->universe, frame->length, frame->data[0]);
 }
@@ -38,7 +41,7 @@ Pick whichever suits your project:
 ```cmake
 # <your-project>/CMakeLists.txt
 cmake_minimum_required(VERSION 3.16)
-set(EXTRA_COMPONENT_DIRS "/path/to/Artnet-IDF/components")
+set(EXTRA_COMPONENT_DIRS "/path/to/ArtnetWifi/components")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(my_app)
 ```
@@ -66,8 +69,9 @@ idf_component_register(SRCS "main.c" REQUIRES artnet)
 
 - **[Component reference](components/artnet/README.md)** - full API, receive and
   transmit walkthroughs, multi-universe tuning.
-- **[Examples](examples/esp-idf)** - `artnet_receive` and `artnet_transmit`,
-  buildable with `idf.py` straight from this repository.
+- **[Examples](examples/esp-idf)** - `artnet_receive`, `artnet_transmit` and
+  `artnet_multi_universe` (a 240 LED, two universe strip assembled and handed
+  to a render task), buildable with `idf.py` straight from this repository.
 - **[Host tests](test/host)** - the protocol code compiles and runs on Linux
   over real loopback UDP, no hardware needed: `cd test/host && make`.
 
@@ -109,10 +113,15 @@ This is a from-scratch ESP-IDF rewrite of the Arduino library
 [rstephan/ArtnetWifi](https://github.com/rstephan/ArtnetWifi), which in turn is
 based on [natcl/Artnet](https://github.com/natcl/Artnet). The protocol handling
 follows their work; the transport, API and threading model are new. See
-[the migration table](components/artnet/README.md#coming-from-the-arduino-artnetwifi-class)
+[the migration table](components/artnet/README.md#coming-from-the-upstream-arduino-artnetwifi-class)
 if you are porting a sketch, and
-[the behaviour notes](components/artnet/README.md#behaviour-differences-from-the-arduino-library)
+[the behaviour notes](components/artnet/README.md#behaviour-differences-from-the-upstream-arduino-library)
 for the bugs fixed along the way.
+
+**Still on Arduino?** This repository stopped being an Arduino library after
+tag [`1.6.3`](https://github.com/lahirunirmalx/ArtnetWifi/tree/1.6.3). Pin your
+`lib_deps` or submodule to that tag, or use upstream
+[rstephan/ArtnetWifi](https://github.com/rstephan/ArtnetWifi) directly.
 
 MIT licensed, see [LICENSE](LICENSE).
 
