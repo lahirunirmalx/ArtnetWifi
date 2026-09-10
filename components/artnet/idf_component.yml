@@ -2,7 +2,7 @@ version: "2.0.0"
 description: Art-Net (DMX over UDP) node for ESP-IDF - receive, transmit and controller discovery.
 url: https://github.com/lahirunirmalx/ArtnetWifi
 repository: https://github.com/lahirunirmalx/ArtnetWifi.git
-documentation: https://github.com/lahirunirmalx/ArtnetWifi/blob/master/components/artnet/README.md
+documentation: https://github.com/lahirunirmalx/ArtnetWifi/blob/main/components/artnet/README.md
 issues: https://github.com/lahirunirmalx/ArtnetWifi/issues
 license: MIT
 maintainers:

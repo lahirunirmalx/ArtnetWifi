@@ -190,7 +190,7 @@ Also give the receive path room to drain the burst: run it with
 `artnet_start_task()` at a priority above your rendering work, and keep the
 callback short. Copying the frame into your own buffer and signalling another
 task is the usual pattern; the
-[`artnet_multi_universe`](https://github.com/lahirunirmalx/ArtnetWifi/blob/master/examples/esp-idf/artnet_multi_universe) example
+[`artnet_multi_universe`](https://github.com/lahirunirmalx/ArtnetWifi/blob/main/examples/esp-idf/artnet_multi_universe) example
 shows it end to end with a length-1 queue.
 
 ## Performance notes
