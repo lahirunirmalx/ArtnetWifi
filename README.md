@@ -2,7 +2,8 @@
 
 An Art-Net (DMX over UDP) node for **ESP-IDF**. No Arduino core, no `WiFi.h`,
 no `String`, no `IPAddress`. It talks straight to lwIP BSD sockets, returns
-`esp_err_t`, and logs through `ESP_LOG*`.
+`esp_err_t`, and logs through `ESP_LOG*`. Receives and transmits ArtDmx and
+answers ArtPoll, so controllers discover it by name.
 
 Works on any ESP-IDF target with a network interface: ESP32, ESP32-S2/S3,
 ESP32-C3/C6/H2, over Wi-Fi or Ethernet. Requires ESP-IDF 4.4 or newer.

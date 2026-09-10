@@ -20,6 +20,7 @@
 
 #include "artnet.h"
 #include "esp_log.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -130,6 +131,13 @@ void app_main(void)
     /* Renderer below the receiver in priority, so a burst of universes is
      * drained from lwIP before any pixels are pushed. */
     xTaskCreate(render_task, "render", 4096, NULL, 4, NULL);
+
+    /* Describe the node so controllers list it with the right universes. */
+    cfg.node.short_name = "ESP strip";
+    cfg.node.long_name = "ESP-IDF Art-Net LED strip, 240 pixels";
+    cfg.node.first_universe = START_UNIVERSE;
+    cfg.node.num_ports = NUM_UNIVERSES;
+    esp_wifi_get_mac(WIFI_IF_STA, cfg.node.mac);
 
     cfg.dmx_cb = on_dmx;
     ESP_ERROR_CHECK(artnet_init(&cfg, &artnet));

@@ -8,7 +8,7 @@ straight from this repository.
 |---------|-------------|-----------------|
 | [`artnet_receive`](artnet_receive) | Joins Wi-Fi, listens on UDP 6454, counts every ArtDmx frame and logs a sample of them (rate limited so the UART never stalls the receive path) | `ArtnetWifiDebug` |
 | [`artnet_transmit`](artnet_transmit) | Sends one universe, ramping an RGB lamp up to white; a `tx_only` node | `ArtnetWifiTransmit` |
-| [`artnet_multi_universe`](artnet_multi_universe) | Assembles a 240 LED strip from two universes in the receive task and hands complete frames to a render task through a length-1 queue. The LED driver is a stub with a comment where `led_strip` plugs in | `ArtnetWifiFastLED`, `ArtnetWifiNeoPixel` |
+| [`artnet_multi_universe`](artnet_multi_universe) | Assembles a 240 LED strip from two universes in the receive task and hands complete frames to a render task through a length-1 queue. Advertises itself as "ESP strip" with both universes. The LED driver is a stub with a comment where `led_strip` plugs in | `ArtnetWifiFastLED`, `ArtnetWifiNeoPixel` |
 
 `common/wifi_connect` is a small shared component that brings up a Wi-Fi
 station and blocks until an IP address is assigned, retrying for as long as it

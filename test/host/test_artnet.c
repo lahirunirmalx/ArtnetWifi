@@ -289,22 +289,98 @@ static void test_foreign_packet(void)
     artnet_deinit(h);
 }
 
-/* 8. ArtPoll is reported by opcode and does not reach the DMX callback. */
+/* 8. ArtPoll: reported by opcode, kept away from the DMX callback, and
+ *    answered with an ArtPollReply unicast to the poller on port 6454. */
 static void test_artpoll(void)
 {
-    artnet_handle_t h = make_node("127.0.0.1", ARTNET_PORT, false);
-    uint8_t buf[ARTNET_DMX_START];
+    artnet_config_t cfg = ARTNET_CONFIG_DEFAULT();
+    artnet_handle_t h = NULL;
+    int sink = make_sink();          /* plays the controller, owns port 6454 */
+    uint8_t buf[300];
     uint16_t opcode = 0;
+    int n;
+
+    cfg.port = ALT_PORT;
+    cfg.dmx_cb = on_dmx;
+    cfg.node.short_name = "TestNode";
+    cfg.node.long_name = "Host test Art-Net node";
+    cfg.node.first_universe = 0x0123;   /* net 1, sub-net 2, universe 3 */
+    cfg.node.num_ports = 2;
+    memcpy(cfg.node.mac, "\x02\x11\x22\x33\x44\x55", 6);
+    memset(&g_rx, 0, sizeof(g_rx));
+    CHECK(artnet_init(&cfg, &h) == ESP_OK, "init failed");
 
     /* A real ArtPoll is 14 bytes: header through TalkToMe and Priority. */
     build_header(buf, ARTNET_OP_POLL, 0, 0);
-    inject(ARTNET_PORT, buf, 14);
+    inject(ALT_PORT, buf, 14);
 
     CHECK(artnet_read(h, 500, &opcode) == ESP_OK, "ArtPoll read failed");
     CHECK(opcode == ARTNET_OP_POLL, "opcode 0x%04x", opcode);
     CHECK(g_rx.calls == 0, "DMX callback fired on ArtPoll");
 
+    n = (int)recv(sink, buf, sizeof(buf), 0);
+    CHECK(n == ARTNET_POLL_REPLY_LEN, "reply is %d bytes, expected %d", n, ARTNET_POLL_REPLY_LEN);
+    if (n == ARTNET_POLL_REPLY_LEN) {
+        uint32_t ip;
+
+        memcpy(&ip, buf + 10, 4);
+        CHECK(memcmp(buf, "Art-Net", 8) == 0, "reply ID");
+        CHECK(buf[8] == 0x00 && buf[9] == 0x21, "reply opcode not 0x2100 LE");
+        CHECK(ip == inet_addr("127.0.0.1"), "reply IP not the node's own address");
+        CHECK(buf[14] == 0x36 && buf[15] == 0x19, "reply port not 6454 LE");
+        CHECK(buf[18] == 0x01, "NetSwitch %u", buf[18]);
+        CHECK(buf[19] == 0x02, "SubSwitch %u", buf[19]);
+        CHECK(strcmp((const char *)buf + 26, "TestNode") == 0, "short name '%s'", buf + 26);
+        CHECK(strcmp((const char *)buf + 44, "Host test Art-Net node") == 0, "long name");
+        CHECK(strncmp((const char *)buf + 108, "#0001 [0001]", 12) == 0, "node report '%.20s'", buf + 108);
+        CHECK(buf[172] == 0 && buf[173] == 2, "NumPorts %u/%u", buf[172], buf[173]);
+        CHECK(buf[174] == 0x80 && buf[175] == 0x80 && buf[176] == 0x00, "PortTypes");
+        CHECK(buf[190] == 3 && buf[191] == 4, "SwOut %u %u", buf[190], buf[191]);
+        CHECK(buf[200] == 0x00, "Style not StNode");
+        CHECK(memcmp(buf + 201, "\x02\x11\x22\x33\x44\x55", 6) == 0, "MAC");
+        CHECK(buf[211] == 1, "BindIndex %u", buf[211]);
+        CHECK(buf[212] & 0x08, "Status2 lacks 15-bit addressing bit");
+        CHECK(buf[182] == 0x00, "GoodOutput claims data before any DMX arrived");
+    }
+
+    /* After a DMX frame the outputs report as active and the counter moves. */
+    build_header(buf, ARTNET_OP_DMX, 0x0123, 2);
+    inject(ALT_PORT, buf, 20);
+    artnet_read(h, 500, NULL);
+    CHECK(artnet_send_poll_reply(h, inet_addr("127.0.0.1")) == ESP_OK, "unsolicited reply failed");
+    n = (int)recv(sink, buf, sizeof(buf), 0);
+    CHECK(n == ARTNET_POLL_REPLY_LEN, "unsolicited reply %d bytes", n);
+    CHECK(n > 182 && buf[182] == 0x80, "GoodOutput not active after DMX");
+    CHECK(n > 120 && strncmp((const char *)buf + 108, "#0001 [0002]", 12) == 0, "poll counter '%.14s'", buf + 108);
+
     artnet_deinit(h);
+
+    /* answer_poll = false must stay silent. */
+    cfg.node.answer_poll = false;
+    CHECK(artnet_init(&cfg, &h) == ESP_OK, "init (no reply) failed");
+    build_header(buf, ARTNET_OP_POLL, 0, 0);
+    inject(ALT_PORT, buf, 14);
+    CHECK(artnet_read(h, 500, &opcode) == ESP_OK && opcode == ARTNET_OP_POLL, "poll not seen");
+    {
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+        setsockopt(sink, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        n = (int)recv(sink, buf, sizeof(buf), 0);
+        CHECK(n < 0, "reply sent although answer_poll is false");
+    }
+    artnet_deinit(h);
+
+    /* Ports must stay inside one sub-net: universe 14 leaves room for 2. */
+    cfg.node.answer_poll = true;
+    cfg.node.first_universe = 14;
+    cfg.node.num_ports = 4;
+    CHECK(artnet_init(&cfg, &h) == ESP_OK, "init (clamp) failed");
+    artnet_send_poll_reply(h, inet_addr("127.0.0.1"));
+    n = (int)recv(sink, buf, sizeof(buf), 0);
+    CHECK(n == ARTNET_POLL_REPLY_LEN && buf[173] == 2, "num_ports not clamped: %u", buf[173]);
+    CHECK(n > 191 && buf[190] == 14 && buf[191] == 15, "SwOut after clamp %u %u", buf[190], buf[191]);
+    artnet_deinit(h);
+
+    close(sink);
 }
 
 /* 9. A non-DMX packet after a DMX frame must not leave DMX accessors
@@ -497,7 +573,7 @@ int main(void)
         { "length clamp",              test_length_clamp },
         { "zero-length ArtDmx",        test_zero_length_dmx },
         { "foreign packet",            test_foreign_packet },
-        { "ArtPoll",                   test_artpoll },
+        { "ArtPoll and ArtPollReply",  test_artpoll },
         { "non-DMX clears DMX state",  test_non_dmx_clears_dmx_state },
         { "buffers independent",       test_buffers_independent },
         { "tx buffer api",             test_tx_buffer_api },

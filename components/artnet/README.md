@@ -132,6 +132,30 @@ on port 6454; a node bound to that port which never reads keeps up to
 `CONFIG_LWIP_UDP_RECVMBOX_SIZE` of those datagrams, and the Wi-Fi RX buffers
 behind them, parked forever. A `tx_only` handle takes an ephemeral port instead.
 
+## Discovery (ArtPollReply)
+
+Controllers find nodes by broadcasting `ArtPoll`; a node that does not answer
+has to be entered by IP. This component answers every `ArtPoll` with an
+`ArtPollReply` unicast to the poller from port 6454, so it shows up in QLC+,
+Resolume, MadMapper and friends under the name and universes you give it:
+
+```c
+cfg.node.short_name = "Bar strip";              /* up to 17 characters */
+cfg.node.long_name = "Left bar, 240 pixels";    /* up to 63 */
+cfg.node.first_universe = 0;                    /* port address of output 1 */
+cfg.node.num_ports = 2;                         /* outputs 1..4, consecutive universes */
+esp_wifi_get_mac(WIFI_IF_STA, cfg.node.mac);    /* optional, informational */
+```
+
+Defaults are `"ArtnetWifi"`, universe 0, one port. Set `cfg.node.answer_poll =
+false` to stay silent. The reply carries the node's own IP, found by asking
+the stack which address routes to the poller, so it works on Wi-Fi and
+Ethernet without an `esp_netif` dependency. One reply describes one sub-net
+of 16 universes, so `num_ports` is clamped to stay inside it.
+
+The specification also asks nodes to announce themselves on power-up;
+`artnet_send_poll_reply(h, broadcast_ip)` does that once your link is up.
+
 ## Multi-universe setups
 
 An Art-Net controller sends one UDP packet per universe, back to back, so a
@@ -158,7 +182,7 @@ Also give the receive path room to drain the burst: run it with
 `artnet_start_task()` at a priority above your rendering work, and keep the
 callback short. Copying the frame into your own buffer and signalling another
 task is the usual pattern; the
-[`artnet_multi_universe`](../../examples/esp-idf/artnet_multi_universe) example
+[`artnet_multi_universe`](https://github.com/lahirunirmalx/ArtnetWifi/blob/master/examples/esp-idf/artnet_multi_universe) example
 shows it end to end with a length-1 queue.
 
 ## Performance notes
@@ -186,6 +210,7 @@ shows it end to end with a length-1 queue.
 | Lifecycle | `artnet_init`, `artnet_deinit` |
 | Receive   | `artnet_read`, `artnet_start_task`, `artnet_stop_task` |
 | Rx state  | `artnet_get_opcode`, `artnet_get_universe`, `artnet_get_rx_length`, `artnet_get_sequence`, `artnet_get_dmx`, `artnet_get_sender_ip`, `artnet_log_packet` |
+| Discovery | `cfg.node` (identity), `artnet_send_poll_reply` |
 | Transmit  | `artnet_set_host`, `artnet_set_universe`, `artnet_set_physical`, `artnet_set_length`, `artnet_set_byte`, `artnet_set_buffer`, `artnet_get_tx_dmx`, `artnet_write`, `artnet_write_ip`, `artnet_write_to` |
 
 ## Coming from the upstream Arduino `ArtnetWifi` class
@@ -232,8 +257,11 @@ These are deliberate fixes, not oversights:
 Kept identical on purpose: the callback fires for every valid ArtDmx frame,
 including zero-length ones that some controllers use as keep-alives.
 
+Added over upstream: `ArtPoll` is answered with an `ArtPollReply`, so the node
+is discoverable. The upstream library only reported the op-code.
+
 ## Not implemented
 
-`ArtPoll` is reported through the op-code but no `ArtPollReply` is sent, so the
-node is not discoverable by Art-Net controllers. This matches the upstream
-Arduino library. `ArtSync` is likewise reported but not acted on.
+`ArtSync` is reported through the op-code but not acted on: frames are handed
+to the callback as they arrive rather than held until the sync packet. RDM,
+`ArtAddress` (remote reconfiguration) and `ArtTimeCode` are not handled.

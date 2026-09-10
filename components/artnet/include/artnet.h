@@ -54,9 +54,10 @@ extern "C" {
 #define ARTNET_PORT 6454
 
 /* Op-codes (little endian on the wire). */
-#define ARTNET_OP_POLL 0x2000
-#define ARTNET_OP_DMX  0x5000
-#define ARTNET_OP_SYNC 0x5200
+#define ARTNET_OP_POLL       0x2000
+#define ARTNET_OP_POLL_REPLY 0x2100
+#define ARTNET_OP_DMX        0x5000
+#define ARTNET_OP_SYNC       0x5200
 
 /* Packet layout. */
 #define ARTNET_ID           "Art-Net"
@@ -64,6 +65,12 @@ extern "C" {
 #define ARTNET_MAX_DMX      512
 #define ARTNET_MAX_PACKET   (ARTNET_DMX_START + ARTNET_MAX_DMX)
 #define ARTNET_PROTOCOL_VER 14
+
+/* ArtPollReply. */
+#define ARTNET_POLL_REPLY_LEN 239
+#define ARTNET_SHORT_NAME_LEN 18   /* including the terminating zero */
+#define ARTNET_LONG_NAME_LEN  64
+#define ARTNET_MAX_PORTS      4
 
 /* Opaque instance handle. */
 typedef struct artnet_ctx *artnet_handle_t;
@@ -86,13 +93,30 @@ typedef struct {
  */
 typedef void (*artnet_dmx_cb_t)(const artnet_dmx_t *frame, void *user_ctx);
 
+/*
+ * How the node describes itself in ArtPollReply, which is what makes it show
+ * up in a controller's device list. Strings are copied at artnet_init().
+ * The advertised outputs are num_ports consecutive universes starting at
+ * first_universe; Art-Net can only describe ports within one sub-net (16
+ * universes) per reply, so num_ports is clamped to stay inside it.
+ */
 typedef struct {
-    uint16_t        port;             /* listen port, 0 selects ARTNET_PORT */
-    const char      *host;            /* default transmit target, NULL for receive only */
-    bool            enable_broadcast; /* allow sending to a broadcast address */
-    bool            tx_only;          /* do not listen on the Art-Net port, see below */
-    artnet_dmx_cb_t dmx_cb;           /* optional ArtDmx callback */
-    void            *user_ctx;        /* passed back to dmx_cb */
+    bool        answer_poll;    /* reply to ArtPoll, default true */
+    const char  *short_name;    /* up to 17 chars, NULL selects "ArtnetWifi" */
+    const char  *long_name;     /* up to 63 chars, NULL selects the short name */
+    uint8_t     mac[6];         /* informational, leave zero if unknown */
+    uint16_t    first_universe; /* 15 bit port address of the first output */
+    uint8_t     num_ports;      /* 1..4 outputs advertised, 0 selects 1 */
+} artnet_node_info_t;
+
+typedef struct {
+    uint16_t           port;             /* listen port, 0 selects ARTNET_PORT */
+    const char         *host;            /* default transmit target, NULL for receive only */
+    bool               enable_broadcast; /* allow sending to a broadcast address */
+    bool               tx_only;          /* do not listen on the Art-Net port, see below */
+    artnet_dmx_cb_t    dmx_cb;           /* optional ArtDmx callback */
+    void               *user_ctx;        /* passed back to dmx_cb */
+    artnet_node_info_t node;             /* identity sent in ArtPollReply */
 } artnet_config_t;
 
 /*
@@ -104,14 +128,22 @@ typedef struct {
  * artnet_read() still works on a tx_only handle but only sees unicast replies.
  */
 
-#define ARTNET_CONFIG_DEFAULT()      \
-    {                                \
-        .port = ARTNET_PORT,         \
-        .host = NULL,                \
-        .enable_broadcast = true,    \
-        .tx_only = false,            \
-        .dmx_cb = NULL,              \
-        .user_ctx = NULL,            \
+#define ARTNET_CONFIG_DEFAULT()                    \
+    {                                              \
+        .port = ARTNET_PORT,                       \
+        .host = NULL,                              \
+        .enable_broadcast = true,                  \
+        .tx_only = false,                          \
+        .dmx_cb = NULL,                            \
+        .user_ctx = NULL,                          \
+        .node = {                                  \
+            .answer_poll = true,                   \
+            .short_name = NULL,                    \
+            .long_name = NULL,                     \
+            .mac = { 0, 0, 0, 0, 0, 0 },           \
+            .first_universe = 0,                   \
+            .num_ports = 1,                        \
+        },                                         \
     }
 
 /*
@@ -174,8 +206,9 @@ esp_err_t artnet_start_task(artnet_handle_t handle, const artnet_task_config_t *
 
 /*
  * Stop the receive task. Safe to call when no task is running. Takes up to
- * 100 ms, the receive task's poll interval. Returns ESP_ERR_INVALID_STATE when
- * called from the receive task itself.
+ * 200 ms: the task's 100 ms poll interval, plus another 100 ms if it is
+ * sitting in its error back-off. Returns ESP_ERR_INVALID_STATE when called
+ * from the receive task itself.
  */
 esp_err_t artnet_stop_task(artnet_handle_t handle);
 
@@ -197,6 +230,15 @@ uint32_t       artnet_get_sender_ip(artnet_handle_t handle);
 
 /* Log the last received packet at ESP_LOG_INFO. */
 void artnet_log_packet(artnet_handle_t handle, bool with_data);
+
+/*
+ * Send an ArtPollReply describing this node to an IPv4 address in network
+ * byte order, port 6454. artnet_read() does this automatically for every
+ * ArtPoll it receives when node.answer_poll is set; call it yourself to
+ * announce the node unsolicited, for example to the subnet broadcast address
+ * right after Wi-Fi comes up, which the Art-Net specification asks nodes to do.
+ */
+esp_err_t artnet_send_poll_reply(artnet_handle_t handle, uint32_t ipv4);
 
 /*
  * Transmit side. The transmit buffer is independent of the receive buffer, so

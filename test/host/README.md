@@ -22,7 +22,7 @@ parser and the packet builder are all exercised for real rather than mocked.
 | length clamp | a packet claiming 512 bytes while carrying 2 reports 2 |
 | zero-length ArtDmx | an 18-byte keep-alive still reaches the callback with length 0 |
 | foreign packet | non Art-Net traffic on port 6454 ignored |
-| ArtPoll | reported by op-code, does not reach the DMX callback |
+| ArtPoll and ArtPollReply | reported by op-code, kept from the DMX callback; the 239-byte reply is checked field by field (own IP, port, net/sub-net switches, names, node report counter, port count, SwOut, MAC, Status2), plus `answer_poll = false`, the unsolicited send, and the sub-net clamp |
 | non-DMX clears DMX state | an ArtPollReply after a DMX frame leaves `rx_length` at 0 instead of describing bytes that are gone |
 | buffers independent | a received frame never alters the staged transmit frame or universe |
 | tx buffer api | channel 511 accepted, 512 and beyond rejected; `set_buffer` copies without touching the length and rejects overruns |

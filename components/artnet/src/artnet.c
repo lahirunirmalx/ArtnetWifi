@@ -31,6 +31,7 @@ THE SOFTWARE.
 
 #include <errno.h>
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,6 +95,16 @@ struct artnet_ctx {
     TaskHandle_t      task;
     volatile bool     task_run;
     SemaphoreHandle_t task_done;
+
+    /* ArtPollReply identity. */
+    bool     answer_poll;
+    char     short_name[ARTNET_SHORT_NAME_LEN];
+    char     long_name[ARTNET_LONG_NAME_LEN];
+    uint8_t  mac[6];
+    uint16_t first_universe;
+    uint8_t  num_ports;
+    uint16_t poll_count;
+    bool     dmx_seen;   /* a DMX frame has arrived, reported as output active */
 };
 
 /* ------------------------------------------------------------------ */
@@ -214,6 +225,101 @@ static esp_err_t artnet_send(artnet_handle_t h, const struct sockaddr_in *dest)
     return ESP_OK;
 }
 
+/*
+ * The IPv4 address this node would use to reach peer. Connecting a throwaway
+ * UDP socket makes the stack pick the route and nail down the local address,
+ * which getsockname() then reports. Works on lwIP and on a POSIX host alike,
+ * and keeps the component free of any esp_netif dependency.
+ */
+static uint32_t artnet_local_ip(uint32_t peer_ip)
+{
+    struct sockaddr_in peer;
+    struct sockaddr_in local;
+    socklen_t len = sizeof(local);
+    uint32_t ip = 0;
+    int s;
+
+    s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s < 0) {
+        return 0;
+    }
+
+    artnet_addr_from_ip(peer_ip, &peer);
+    if (connect(s, (struct sockaddr *)&peer, sizeof(peer)) == 0 &&
+        getsockname(s, (struct sockaddr *)&local, &len) == 0) {
+        ip = (uint32_t)local.sin_addr.s_addr;
+    }
+    close(s);
+
+    return ip;
+}
+
+/*
+ * Fill b with an ArtPollReply (239 bytes) describing this node. Field offsets
+ * follow the Art-Net 4 specification; every unused field is zero.
+ */
+static void artnet_build_poll_reply(artnet_handle_t h, uint32_t local_ip, uint8_t *b)
+{
+    uint8_t net = (uint8_t)((h->first_universe >> 8) & 0x7f);
+    uint8_t subnet = (uint8_t)((h->first_universe >> 4) & 0x0f);
+    uint8_t universe = (uint8_t)(h->first_universe & 0x0f);
+
+    memset(b, 0, ARTNET_POLL_REPLY_LEN);
+    memcpy(b, artnet_id, sizeof(artnet_id));
+    b[8] = (uint8_t)(ARTNET_OP_POLL_REPLY & 0xff);
+    b[9] = (uint8_t)(ARTNET_OP_POLL_REPLY >> 8);
+    memcpy(b + 10, &local_ip, 4);                  /* IP, network order */
+    b[14] = (uint8_t)(ARTNET_PORT & 0xff);         /* port, little endian */
+    b[15] = (uint8_t)(ARTNET_PORT >> 8);
+    b[16] = 2;                                     /* VersInfoH, component 2.x */
+    b[17] = 0;                                     /* VersInfoL */
+    b[18] = net;                                   /* NetSwitch */
+    b[19] = subnet;                                /* SubSwitch */
+    b[20] = 0x00;                                  /* OemHi, 0x00ff = OemUnknown */
+    b[21] = 0xff;                                  /* Oem */
+    b[22] = 0;                                     /* Ubea version */
+    b[23] = 0xe0;                                  /* Status1: indicators normal, addresses set by network */
+    b[24] = 0xf0;                                  /* EstaManLo, 0x7ff0 is the prototyping range */
+    b[25] = 0x7f;                                  /* EstaManHi */
+    memcpy(b + 26, h->short_name, strlen(h->short_name));
+    memcpy(b + 44, h->long_name, strlen(h->long_name));
+    snprintf((char *)b + 108, 64, "#0001 [%04u] %s", h->poll_count % 10000u,
+             h->dmx_seen ? "receiving DMX" : "idle");
+    b[172] = 0;                                    /* NumPortsHi */
+    b[173] = h->num_ports;                         /* NumPortsLo */
+    for (uint8_t i = 0; i < h->num_ports; i++) {
+        b[174 + i] = 0x80;                         /* PortTypes: output, DMX512 */
+        b[182 + i] = h->dmx_seen ? 0x80 : 0x00;    /* GoodOutputA: data being output */
+        b[190 + i] = (uint8_t)(universe + i);      /* SwOut: low nibble of the port address */
+    }
+    b[200] = 0x00;                                 /* Style: StNode */
+    memcpy(b + 201, h->mac, 6);
+    memcpy(b + 207, &local_ip, 4);                 /* BindIp */
+    b[211] = 1;                                    /* BindIndex */
+    b[212] = 0x08;                                 /* Status2: 15 bit port addresses supported */
+    /* 213..238: GoodOutputB, Status3, DefaultRespUID, User, RefreshRate, filler: zero */
+}
+
+static esp_err_t artnet_send_reply(artnet_handle_t h, uint32_t ipv4)
+{
+    uint8_t reply[ARTNET_POLL_REPLY_LEN];
+    struct sockaddr_in dest;
+    int sent;
+
+    h->poll_count++;
+    artnet_build_poll_reply(h, artnet_local_ip(ipv4), reply);
+    artnet_addr_from_ip(ipv4, &dest);
+
+    sent = sendto(h->sock, reply, sizeof(reply), 0,
+                  (const struct sockaddr *)&dest, sizeof(dest));
+    if (sent < 0) {
+        ESP_LOGD(TAG, "ArtPollReply failed: errno %d", errno);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
 /* Parse one received datagram. Returns the op-code, or 0 when not Art-Net. */
 static uint16_t artnet_parse(artnet_handle_t h, int n, uint32_t sender_ip)
 {
@@ -242,6 +348,11 @@ static uint16_t artnet_parse(artnet_handle_t h, int n, uint32_t sender_ip)
         /* rx_buf now holds this packet, not DMX data. Make the DMX accessors
          * say so instead of describing a frame that is no longer there. */
         h->rx_length = 0;
+
+        if (opcode == ARTNET_OP_POLL && h->answer_poll) {
+            /* Unicast to the poller, from port 6454, as controllers expect. */
+            artnet_send_reply(h, sender_ip);
+        }
         return opcode;
     }
 
@@ -260,6 +371,7 @@ static uint16_t artnet_parse(artnet_handle_t h, int n, uint32_t sender_ip)
             length = ARTNET_MAX_DMX;
         }
         h->rx_length = length;
+        h->dmx_seen = true;
 
         if (h->dmx_cb != NULL) {
             artnet_dmx_t frame = {
@@ -311,6 +423,29 @@ esp_err_t artnet_init(const artnet_config_t *config, artnet_handle_t *out_handle
     h->dmx_cb = config->dmx_cb;
     h->user_ctx = config->user_ctx;
     artnet_init_tx_header(h);
+
+    /* Node identity for ArtPollReply. Strings are copied, and truncated to
+     * what the packet can carry. */
+    h->answer_poll = config->node.answer_poll;
+    strncpy(h->short_name,
+            config->node.short_name != NULL ? config->node.short_name : "ArtnetWifi",
+            sizeof(h->short_name) - 1);
+    strncpy(h->long_name,
+            config->node.long_name != NULL ? config->node.long_name : h->short_name,
+            sizeof(h->long_name) - 1);
+    memcpy(h->mac, config->node.mac, sizeof(h->mac));
+    h->first_universe = config->node.first_universe & 0x7fff;
+    h->num_ports = config->node.num_ports != 0 ? config->node.num_ports : 1;
+    if (h->num_ports > ARTNET_MAX_PORTS) {
+        h->num_ports = ARTNET_MAX_PORTS;
+    }
+    if (h->num_ports > 16 - (h->first_universe & 0x0f)) {
+        /* One reply describes one sub-net of 16 universes; ports past its
+         * end cannot be advertised from this handle. */
+        h->num_ports = (uint8_t)(16 - (h->first_universe & 0x0f));
+        ESP_LOGW(TAG, "num_ports clamped to %u, ports must stay within one sub-net",
+                 h->num_ports);
+    }
 
     h->task_done = xSemaphoreCreateBinary();
     if (h->task_done == NULL) {
@@ -599,6 +734,15 @@ void artnet_log_packet(artnet_handle_t h, bool with_data)
     if (with_data && h->rx_length > 0) {
         ESP_LOG_BUFFER_HEX(TAG, h->rx_buf + ARTNET_DMX_START, h->rx_length);
     }
+}
+
+esp_err_t artnet_send_poll_reply(artnet_handle_t h, uint32_t ipv4)
+{
+    if (h == NULL || h->sock < 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return artnet_send_reply(h, ipv4);
 }
 
 /* ------------------------------------------------------------------ */
