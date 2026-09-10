@@ -26,7 +26,7 @@ dependencies:
   artnet:
     git: https://github.com/lahirunirmalx/ArtnetWifi.git
     path: components/artnet
-    version: "*"
+    version: "^2.0.0"
 ```
 
 Then declare the dependency in the component that uses it:

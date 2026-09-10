@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 - unreleased
+## 2.0.0 - 2026-09-10
 
 This release turns the repository into an ESP-IDF component. It is a breaking
 change for Arduino users.
