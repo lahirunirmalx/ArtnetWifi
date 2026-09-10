@@ -1,74 +1,88 @@
-# ArtnetWifi
+# Artnet-IDF
 
-[![arduino-library-badge](https://www.ardu-badge.com/badge/ArtnetWifi.svg?)](https://www.ardu-badge.com/ArtnetWifi)
+An Art-Net (DMX over UDP) node for **ESP-IDF**. No Arduino core, no `WiFi.h`,
+no `String`, no `IPAddress`. It talks straight to lwIP BSD sockets, returns
+`esp_err_t`, and logs through `ESP_LOG*`.
 
-An Art-Net library for Wifi-Arduino's. Tested on ESP8266, ESP32, Pi Pico W, WiFi101 (e.g. MKR1000) and WiFiNINA (e.g. NANO 33 IoT) devices.
+Works on any ESP-IDF target with a network interface: ESP32, ESP32-S2/S3,
+ESP32-C3/C6/H2, over Wi-Fi or Ethernet. Requires ESP-IDF 4.4 or newer.
 
-Note: this library assumes you are using a wifi module.
+```c
+#include "artnet.h"
 
-**Using ESP-IDF without the Arduino core?** See [ESP-IDF component](#esp-idf-component) below.
+static void on_dmx(const artnet_dmx_t *frame, void *user_ctx)
+{
+    ESP_LOGI("app", "universe %u, %u channels, first byte %u",
+             frame->universe, frame->length, frame->data[0]);
+}
 
-Based on https://github.com/natcl/Artnet [master](https://github.com/natcl/Artnet/archive/master.zip)
+void app_main(void)
+{
+    artnet_config_t cfg = ARTNET_CONFIG_DEFAULT();
+    artnet_handle_t artnet;
+
+    /* Bring up Wi-Fi or Ethernet yourself first. */
+
+    cfg.dmx_cb = on_dmx;
+    ESP_ERROR_CHECK(artnet_init(&cfg, &artnet));
+    ESP_ERROR_CHECK(artnet_start_task(artnet, NULL));
+}
+```
 
 ## Installation
 
-### Arduino IDE
+Pick whichever suits your project:
 
-Navigate to **Sketch** -> **Include Library** -> **Manage Libraries...**,
-then search for `ArtnetWifi` and the library will show up. Click **Install** and the library is ready to use.
+**`EXTRA_COMPONENT_DIRS`** - clone this repository anywhere:
 
-### PlatformIO Core (CLI)
-
-```
-$ pio init --board nodemcuv2
-$ pio lib install artnetwifi
-```
-
-### Manual
-
-Place this in your `~/Documents/Arduino/libraries` folder.
-
-## Examples
-
-Different examples are provided, here is a summary of what each example does.
-
-### ArtnetWifiDebug
-
-Simple test for WiFi, serial and Art-Net.
-
-Example output (Serial Monitor, 115200 Baud):
-```
-DMX: Univ: 0, Seq: 0, Data (48): 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ...
+```cmake
+# <your-project>/CMakeLists.txt
+cmake_minimum_required(VERSION 3.16)
+set(EXTRA_COMPONENT_DIRS "/path/to/Artnet-IDF/components")
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(my_app)
 ```
 
-If this example is not working, don't try anything else!
+**Copy** `components/artnet` into your project's `components/` directory.
+ESP-IDF picks it up with no further configuration.
 
-### ArtnetWifiDebug2 (ArtnetWifiDebug with C++11 style)
+**IDF Component Manager** - in `main/idf_component.yml`:
 
-See **ArtnetWifiDebug**.
+```yaml
+dependencies:
+  artnet:
+    git: https://github.com/lahirunirmalx/ArtnetWifi.git
+    path: components/artnet
+    version: "*"
+```
 
-**Note:** Not all controllers support this type of code!
+Then declare the dependency where you use it:
 
-### ArtnetWifiFastLED
+```cmake
+idf_component_register(SRCS "main.c" REQUIRES artnet)
+```
 
-This example will receive multiple universes via Art-Net and control a strip of WS2812 LEDs via the [FastLED library](https://github.com/FastLED/FastLED). It is similar to the NeoPixel example but it will work on the ESP32 and the ESP8266 controller as well.
+## Documentation
 
-### ArtnetWifiNeoPixel
+- **[Component reference](components/artnet/README.md)** - full API, receive and
+  transmit walkthroughs, multi-universe tuning.
+- **[Examples](examples/esp-idf)** - `artnet_receive` and `artnet_transmit`,
+  buildable with `idf.py` straight from this repository.
 
-This example will receive multiple universes via Art-Net and control a strip of WS2811 LEDs via Adafruit's [NeoPixel library](https://github.com/adafruit/Adafruit_NeoPixel).
+```
+. $IDF_PATH/export.sh
+cd examples/esp-idf/artnet_receive
+idf.py set-target esp32
+idf.py build flash monitor
+```
 
-### ArtnetWifiTransmit
+## Universes and LED counts
 
-This is a simple transmitter. Send 3 byte over into the Art-Net, to make a RGB light ramp-up in white.
+An Art-Net frame carries at most 512 bytes. Divided by 3 colors that is 170.66
+LEDs, so a single universe usually drives 170 LEDs and the last 2 bytes go
+unused.
 
-
-### Notes
-
-The examples `FastLED` and `NeoPixel` can utilize many universes to light up hundreds of LEDs.
-Normaly Art-Net frame can handle 512 bytes. Divide this by 3 colors, so a single universe can
-have 170.66 LEDs. For easy access, only 170 LEDs are used. The last 2 byte per universe are "lost".
-
-**Example:** 240 LEDs, 720 Byte, 2 Universes
+**Example:** 240 LEDs, 720 bytes, 2 universes
 
 **Universe "1"**
 
@@ -84,34 +98,21 @@ have 170.66 LEDs. For easy access, only 170 LEDs are used. The last 2 byte per u
 |Color|  R|  G|  B|...|  R|  G|  B|
 |LED  |171|171|171|...|240|240|240|
 
-*You only have to send 510 byte DMX-data per frame. Extra byte(s) at the end will be ignored!*
+*You only have to send 510 bytes of DMX data per frame. Extra bytes at the end
+are ignored.*
 
-## ESP-IDF component
+## Credits
 
-The `components/artnet` directory holds a separate, pure ESP-IDF implementation
-of the same protocol. It has no dependency on the Arduino core: no `WiFi.h`, no
-`String`, no `IPAddress`. It uses lwIP BSD sockets directly and returns
-`esp_err_t`.
+This is a from-scratch ESP-IDF rewrite of the Arduino library
+[rstephan/ArtnetWifi](https://github.com/rstephan/ArtnetWifi), which in turn is
+based on [natcl/Artnet](https://github.com/natcl/Artnet). The protocol handling
+follows their work; the transport, API and threading model are new. See
+[the migration table](components/artnet/README.md#coming-from-the-arduino-artnetwifi-class)
+if you are porting a sketch, and
+[the behaviour notes](components/artnet/README.md#behaviour-differences-from-the-arduino-library)
+for the bugs fixed along the way.
 
-```c
-artnet_config_t cfg = ARTNET_CONFIG_DEFAULT();
-artnet_handle_t artnet;
-
-cfg.dmx_cb = on_dmx;
-ESP_ERROR_CHECK(artnet_init(&cfg, &artnet));
-artnet_read(artnet, 1000, NULL);
-```
-
-Requires ESP-IDF 4.4 or newer. Add it with `EXTRA_COMPONENT_DIRS`, by copying
-`components/artnet` into your project, or as an IDF Component Manager git
-dependency.
-
-- [Component documentation and API reference](components/artnet/README.md)
-- [ESP-IDF examples](examples/esp-idf) - `artnet_receive` and `artnet_transmit`
-
-The Arduino library in `src/` is unchanged and both can live in the same
-repository; the ESP-IDF sources are outside `src/` so the Arduino build never
-sees them.
+MIT licensed, see [LICENSE](LICENSE).
 
 # Art-Net
 

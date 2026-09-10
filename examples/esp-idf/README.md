@@ -1,11 +1,11 @@
 # ESP-IDF examples
 
-Pure ESP-IDF projects for the `artnet` component in
-[`components/artnet`](../../components/artnet). They do not use the Arduino
-core.
+Projects for the `artnet` component in
+[`components/artnet`](../../components/artnet), buildable with `idf.py`
+straight from this repository.
 
-| Example | Description | Arduino equivalent |
-|---------|-------------|--------------------|
+| Example | Description | Upstream sketch |
+|---------|-------------|-----------------|
 | [`artnet_receive`](artnet_receive) | Joins Wi-Fi, listens on UDP 6454 and logs every ArtDmx frame | `ArtnetWifiDebug` |
 | [`artnet_transmit`](artnet_transmit) | Sends one universe, ramping an RGB lamp up to white | `ArtnetWifiTransmit` |
 

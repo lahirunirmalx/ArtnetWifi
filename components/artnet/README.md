@@ -4,9 +4,10 @@ A pure ESP-IDF component that sends and receives Art-Net (DMX over UDP) frames.
 No Arduino core, no `WiFi.h`, no `String`, no `IPAddress`. It talks straight to
 lwIP BSD sockets and returns `esp_err_t`.
 
-This is a rewrite of the `ArtnetWifi` Arduino library that lives in this same
-repository. The Art-Net wire format and the behaviour are the same, the API is
-not: it is a C handle-based API that fits ESP-IDF conventions.
+This is a rewrite of the upstream Arduino library
+[rstephan/ArtnetWifi](https://github.com/rstephan/ArtnetWifi). The Art-Net wire
+format and the behaviour are the same, the API is not: it is a C handle-based
+API that fits ESP-IDF conventions.
 
 ## Adding it to a project
 
@@ -109,10 +110,10 @@ and receive at the same time. The host name is resolved once, at
 | Rx state  | `artnet_get_opcode`, `artnet_get_universe`, `artnet_get_rx_length`, `artnet_get_sequence`, `artnet_get_dmx`, `artnet_get_sender_ip`, `artnet_log_packet` |
 | Transmit  | `artnet_set_host`, `artnet_set_universe`, `artnet_set_physical`, `artnet_set_length`, `artnet_set_byte`, `artnet_set_buffer`, `artnet_get_tx_dmx`, `artnet_write`, `artnet_write_to` |
 
-## Coming from the Arduino `ArtnetWifi` class
+## Coming from the upstream Arduino `ArtnetWifi` class
 
-| Arduino | ESP-IDF |
-|---------|---------|
+| Arduino (upstream) | ESP-IDF (here) |
+|--------------------|----------------|
 | `ArtnetWifi artnet; artnet.begin(host)` | `artnet_init(&cfg, &handle)` with `cfg.host = host` |
 | `artnet.stop()` | `artnet_deinit(handle)` |
 | `artnet.read()` | `artnet_read(handle, timeout_ms, &opcode)` |
@@ -124,7 +125,7 @@ and receive at the same time. The host name is resolved once, at
 | `artnet.getSenderIp()` | `artnet_get_sender_ip(handle)` (IPv4, network byte order) |
 | `printPacketHeader/Content()` | `artnet_log_packet(handle, with_data)` |
 
-## Behaviour differences from the Arduino library
+## Behaviour differences from the upstream Arduino library
 
 These are deliberate fixes, not oversights:
 
@@ -143,5 +144,5 @@ These are deliberate fixes, not oversights:
 ## Not implemented
 
 `ArtPoll` is reported through the op-code but no `ArtPollReply` is sent, so the
-node is not discoverable by Art-Net controllers. This matches the Arduino
-library. `ArtSync` is likewise reported but not acted on.
+node is not discoverable by Art-Net controllers. This matches the upstream
+Arduino library. `ArtSync` is likewise reported but not acted on.

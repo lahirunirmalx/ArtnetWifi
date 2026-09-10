@@ -1,8 +1,8 @@
 /*
- * Art-Net receive example, pure ESP-IDF.
+ * Art-Net receive example.
  *
  * Joins a Wi-Fi network, listens on UDP 6454 and logs every ArtDmx frame.
- * This is the ESP-IDF counterpart of the Arduino ArtnetWifiDebug sketch.
+ * Counterpart of the upstream ArtnetWifiDebug sketch.
  *
  * This example may be copied under the terms of the MIT license, see the
  * LICENSE file for details.

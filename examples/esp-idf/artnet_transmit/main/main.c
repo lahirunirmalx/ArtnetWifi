@@ -1,8 +1,8 @@
 /*
- * Art-Net transmit example, pure ESP-IDF.
+ * Art-Net transmit example.
  *
  * Sends a single universe with 3 channels, ramping an RGB lamp up to white.
- * This is the ESP-IDF counterpart of the Arduino ArtnetWifiTransmit sketch.
+ * Counterpart of the upstream ArtnetWifiTransmit sketch.
  *
  * This example may be copied under the terms of the MIT license, see the
  * LICENSE file for details.

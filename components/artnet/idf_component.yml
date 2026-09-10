@@ -1,6 +1,6 @@
 version: "2.0.0"
 description: Art-Net (DMX over UDP) node for ESP-IDF, no Arduino core required.
-url: https://github.com/rstephan/ArtnetWifi
+url: https://github.com/lahirunirmalx/ArtnetWifi
 repository: https://github.com/lahirunirmalx/ArtnetWifi.git
 documentation: https://github.com/lahirunirmalx/ArtnetWifi/blob/master/components/artnet/README.md
 issues: https://github.com/lahirunirmalx/ArtnetWifi/issues
