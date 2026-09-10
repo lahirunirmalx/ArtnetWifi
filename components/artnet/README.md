@@ -140,6 +140,7 @@ has to be entered by IP. This component answers every `ArtPoll` with an
 Resolume, MadMapper and friends under the name and universes you give it:
 
 ```c
+cfg.node.ip = got_ip_event->ip_info.ip.addr;     /* own address, network order */
 cfg.node.short_name = "Bar strip";              /* up to 17 characters */
 cfg.node.long_name = "Left bar, 240 pixels";    /* up to 63 */
 cfg.node.first_universe = 0;                    /* port address of output 1 */
@@ -147,11 +148,23 @@ cfg.node.num_ports = 2;                         /* outputs 1..4, consecutive uni
 esp_wifi_get_mac(WIFI_IF_STA, cfg.node.mac);    /* optional, informational */
 ```
 
+`cfg.node.ip` is required for discovery to be useful: the controller lists the
+node under that address. lwIP cannot tell a socket bound to `INADDR_ANY` which
+address it answers from, so the component does not guess; take the value from
+your `IP_EVENT_STA_GOT_IP` (or `_ETH_`) handler, where `ip_info.ip.addr` is
+already in the right form, and call `artnet_set_node_ip()` if DHCP later hands
+out a different one. A reply sent with no address goes out carrying `0.0.0.0`
+and logs a warning once.
+
 Defaults are `"ArtnetWifi"`, universe 0, one port. Set `cfg.node.answer_poll =
-false` to stay silent. The reply carries the node's own IP, found by asking
-the stack which address routes to the poller, so it works on Wi-Fi and
-Ethernet without an `esp_netif` dependency. One reply describes one sub-net
-of 16 universes, so `num_ports` is clamped to stay inside it.
+false` to stay silent. One reply describes one sub-net of 16 universes, so
+`num_ports` is clamped to stay inside it.
+
+The reply is unicast to the poller. The specification's default is the
+directed broadcast address, with unicast only when the poller asks for it in
+`TalkToMe`; mainstream controllers accept the unicast, and it needs no netmask
+knowledge. If yours does not, `artnet_send_poll_reply(h, broadcast_ip)` after
+each `ARTNET_OP_POLL` from `artnet_read()` gives you the broadcast behaviour.
 
 The specification also asks nodes to announce themselves on power-up;
 `artnet_send_poll_reply(h, broadcast_ip)` does that once your link is up.
@@ -210,7 +223,7 @@ shows it end to end with a length-1 queue.
 | Lifecycle | `artnet_init`, `artnet_deinit` |
 | Receive   | `artnet_read`, `artnet_start_task`, `artnet_stop_task` |
 | Rx state  | `artnet_get_opcode`, `artnet_get_universe`, `artnet_get_rx_length`, `artnet_get_sequence`, `artnet_get_dmx`, `artnet_get_sender_ip`, `artnet_log_packet` |
-| Discovery | `cfg.node` (identity), `artnet_send_poll_reply` |
+| Discovery | `cfg.node` (identity), `artnet_send_poll_reply`, `artnet_set_node_ip` |
 | Transmit  | `artnet_set_host`, `artnet_set_universe`, `artnet_set_physical`, `artnet_set_length`, `artnet_set_byte`, `artnet_set_buffer`, `artnet_get_tx_dmx`, `artnet_write`, `artnet_write_ip`, `artnet_write_to` |
 
 ## Coming from the upstream Arduino `ArtnetWifi` class

@@ -5,6 +5,8 @@ repository: https://github.com/lahirunirmalx/ArtnetWifi.git
 documentation: https://github.com/lahirunirmalx/ArtnetWifi/blob/master/components/artnet/README.md
 issues: https://github.com/lahirunirmalx/ArtnetWifi/issues
 license: MIT
+maintainers:
+  - "lahiru <lahirunirmalx@gmail.com>"
 tags:
   - artnet
   - art-net

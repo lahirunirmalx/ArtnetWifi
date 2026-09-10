@@ -135,6 +135,7 @@ void app_main(void)
     /* Describe the node so controllers list it with the right universes. */
     cfg.node.short_name = "ESP strip";
     cfg.node.long_name = "ESP-IDF Art-Net LED strip, 240 pixels";
+    cfg.node.ip = wifi_connect_ip();
     cfg.node.first_universe = START_UNIVERSE;
     cfg.node.num_ports = NUM_UNIVERSES;
     esp_wifi_get_mac(WIFI_IF_STA, cfg.node.mac);

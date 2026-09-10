@@ -61,6 +61,7 @@ void app_main(void)
 
     cfg.dmx_cb = on_dmx;
     cfg.node.short_name = "ESP debug"; /* what controllers list this node as */
+    cfg.node.ip = wifi_connect_ip();   /* and the address they list it under */
     ESP_ERROR_CHECK(artnet_init(&cfg, &artnet));
 
     /* Blocking receive loop. Use artnet_start_task() to run it in the

@@ -16,6 +16,10 @@ extern "C" {
  */
 esp_err_t wifi_connect(const char *ssid, const char *password);
 
+/* The IPv4 address wifi_connect() obtained, in network byte order. Feed it to
+ * cfg.node.ip so ArtPollReply advertises the right address. */
+uint32_t wifi_connect_ip(void);
+
 #ifdef __cplusplus
 }
 #endif

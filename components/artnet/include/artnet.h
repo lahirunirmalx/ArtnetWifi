@@ -99,9 +99,18 @@ typedef void (*artnet_dmx_cb_t)(const artnet_dmx_t *frame, void *user_ctx);
  * The advertised outputs are num_ports consecutive universes starting at
  * first_universe; Art-Net can only describe ports within one sub-net (16
  * universes) per reply, so num_ports is clamped to stay inside it.
+ *
+ * ip is the node's own IPv4 address in network byte order and must be set for
+ * discovery to work: controllers list the node under this address. Take it
+ * from your IP_EVENT_STA_GOT_IP / IP_EVENT_ETH_GOT_IP handler
+ * (event->ip_info.ip.addr is already in this form), and refresh it with
+ * artnet_set_node_ip() if DHCP hands out a new one. lwIP cannot tell a socket
+ * bound to INADDR_ANY which address it will answer from, so the component does
+ * not guess.
  */
 typedef struct {
     bool        answer_poll;    /* reply to ArtPoll, default true */
+    uint32_t    ip;             /* own IPv4, network byte order, 0 = unknown */
     const char  *short_name;    /* up to 17 chars, NULL selects "ArtnetWifi" */
     const char  *long_name;     /* up to 63 chars, NULL selects the short name */
     uint8_t     mac[6];         /* informational, leave zero if unknown */
@@ -138,6 +147,7 @@ typedef struct {
         .user_ctx = NULL,                          \
         .node = {                                  \
             .answer_poll = true,                   \
+            .ip = 0,                               \
             .short_name = NULL,                    \
             .long_name = NULL,                     \
             .mac = { 0, 0, 0, 0, 0, 0 },           \
@@ -239,6 +249,10 @@ void artnet_log_packet(artnet_handle_t handle, bool with_data);
  * right after Wi-Fi comes up, which the Art-Net specification asks nodes to do.
  */
 esp_err_t artnet_send_poll_reply(artnet_handle_t handle, uint32_t ipv4);
+
+/* Update the address advertised in ArtPollReply, for example after a DHCP
+ * renewal. Same form as artnet_node_info_t.ip. */
+esp_err_t artnet_set_node_ip(artnet_handle_t handle, uint32_t ipv4);
 
 /*
  * Transmit side. The transmit buffer is independent of the receive buffer, so

@@ -302,6 +302,7 @@ static void test_artpoll(void)
 
     cfg.port = ALT_PORT;
     cfg.dmx_cb = on_dmx;
+    cfg.node.ip = inet_addr("127.0.0.1");
     cfg.node.short_name = "TestNode";
     cfg.node.long_name = "Host test Art-Net node";
     cfg.node.first_universe = 0x0123;   /* net 1, sub-net 2, universe 3 */
@@ -354,6 +355,23 @@ static void test_artpoll(void)
     CHECK(n > 120 && strncmp((const char *)buf + 108, "#0001 [0002]", 12) == 0, "poll counter '%.14s'", buf + 108);
 
     artnet_deinit(h);
+
+    /* Without an address the reply still goes out, carrying 0.0.0.0, and
+     * artnet_set_node_ip() fixes it up afterwards. */
+    cfg.node.ip = 0;
+    CHECK(artnet_init(&cfg, &h) == ESP_OK, "init (no ip) failed");
+    artnet_send_poll_reply(h, inet_addr("127.0.0.1"));
+    n = (int)recv(sink, buf, sizeof(buf), 0);
+    CHECK(n == ARTNET_POLL_REPLY_LEN && memcmp(buf + 10, "\0\0\0\0", 4) == 0,
+          "reply without ip did not carry 0.0.0.0");
+    CHECK(artnet_set_node_ip(h, inet_addr("10.1.2.3")) == ESP_OK, "set_node_ip failed");
+    artnet_send_poll_reply(h, inet_addr("127.0.0.1"));
+    n = (int)recv(sink, buf, sizeof(buf), 0);
+    CHECK(n == ARTNET_POLL_REPLY_LEN && memcmp(buf + 10, "\x0a\x01\x02\x03", 4) == 0,
+          "set_node_ip not reflected in reply");
+    CHECK(artnet_set_node_ip(NULL, 1) == ESP_ERR_INVALID_ARG, "set_node_ip(NULL) accepted");
+    artnet_deinit(h);
+    cfg.node.ip = inet_addr("127.0.0.1");
 
     /* answer_poll = false must stay silent. */
     cfg.node.answer_poll = false;

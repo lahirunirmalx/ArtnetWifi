@@ -98,6 +98,8 @@ struct artnet_ctx {
 
     /* ArtPollReply identity. */
     bool     answer_poll;
+    uint32_t node_ip;    /* own address, network order, 0 when the app has not told us */
+    bool     ip_warned;
     char     short_name[ARTNET_SHORT_NAME_LEN];
     char     long_name[ARTNET_LONG_NAME_LEN];
     uint8_t  mac[6];
@@ -226,35 +228,6 @@ static esp_err_t artnet_send(artnet_handle_t h, const struct sockaddr_in *dest)
 }
 
 /*
- * The IPv4 address this node would use to reach peer. Connecting a throwaway
- * UDP socket makes the stack pick the route and nail down the local address,
- * which getsockname() then reports. Works on lwIP and on a POSIX host alike,
- * and keeps the component free of any esp_netif dependency.
- */
-static uint32_t artnet_local_ip(uint32_t peer_ip)
-{
-    struct sockaddr_in peer;
-    struct sockaddr_in local;
-    socklen_t len = sizeof(local);
-    uint32_t ip = 0;
-    int s;
-
-    s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s < 0) {
-        return 0;
-    }
-
-    artnet_addr_from_ip(peer_ip, &peer);
-    if (connect(s, (struct sockaddr *)&peer, sizeof(peer)) == 0 &&
-        getsockname(s, (struct sockaddr *)&local, &len) == 0) {
-        ip = (uint32_t)local.sin_addr.s_addr;
-    }
-    close(s);
-
-    return ip;
-}
-
-/*
  * Fill b with an ArtPollReply (239 bytes) describing this node. Field offsets
  * follow the Art-Net 4 specification; every unused field is zero.
  */
@@ -306,8 +279,15 @@ static esp_err_t artnet_send_reply(artnet_handle_t h, uint32_t ipv4)
     struct sockaddr_in dest;
     int sent;
 
+    if (h->node_ip == 0 && !h->ip_warned) {
+        /* Send anyway so the packet flow can be watched, but say why the
+         * controller will list a node at 0.0.0.0. Once is enough. */
+        h->ip_warned = true;
+        ESP_LOGW(TAG, "ArtPollReply without own IP: set cfg.node.ip or call artnet_set_node_ip()");
+    }
+
     h->poll_count++;
-    artnet_build_poll_reply(h, artnet_local_ip(ipv4), reply);
+    artnet_build_poll_reply(h, h->node_ip, reply);
     artnet_addr_from_ip(ipv4, &dest);
 
     sent = sendto(h->sock, reply, sizeof(reply), 0,
@@ -427,6 +407,7 @@ esp_err_t artnet_init(const artnet_config_t *config, artnet_handle_t *out_handle
     /* Node identity for ArtPollReply. Strings are copied, and truncated to
      * what the packet can carry. */
     h->answer_poll = config->node.answer_poll;
+    h->node_ip = config->node.ip;
     strncpy(h->short_name,
             config->node.short_name != NULL ? config->node.short_name : "ArtnetWifi",
             sizeof(h->short_name) - 1);
@@ -743,6 +724,17 @@ esp_err_t artnet_send_poll_reply(artnet_handle_t h, uint32_t ipv4)
     }
 
     return artnet_send_reply(h, ipv4);
+}
+
+esp_err_t artnet_set_node_ip(artnet_handle_t h, uint32_t ipv4)
+{
+    if (h == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    h->node_ip = ipv4;
+    h->ip_warned = false;
+
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------ */

@@ -25,6 +25,7 @@ static const char *TAG = "wifi";
 
 static EventGroupHandle_t s_wifi_events;
 static int                s_retry_count;
+static uint32_t           s_ip;   /* last address assigned, network byte order */
 
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -41,6 +42,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
 
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&event->ip_info.ip));
+        s_ip = event->ip_info.ip.addr;
         s_retry_count = 0;
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
@@ -102,4 +104,9 @@ esp_err_t wifi_connect(const char *ssid, const char *password)
     xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
     return ESP_OK;
+}
+
+uint32_t wifi_connect_ip(void)
+{
+    return s_ip;
 }
